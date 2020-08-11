@@ -18,6 +18,7 @@ import pystan
 import re,timeit,pickle,argparse,multiprocessing,os
 import matplotlib.ticker as mtick
 from os import path
+import hashlib
 cosmo=Planck15
 
 
@@ -33,20 +34,35 @@ parser.add_argument('zkey',type=str,
                     help='Name (or column) of the redshift column to be used for this run')
 parser.add_argument('--niter',type=int,default=3000,
                     help='Number of iterations per chain')
+parser.add_argument('--outputdir',type=str,default='.',
+                    help='Directory to write output pickle file')
 parser.add_argument('--nchains',type=int,default=4,
                     help='Number of chains to run')
+parser.add_argument('--extra_dispersion',action='store_true',
+                    help='Add an additional parameter for diagonal velocity uncertainty')
+parser.add_argument('--optimizing',action='store_true',
+                    help='Useful for debugging: don\'t run mcmc, instead just return mode of posterior')
 parser.add_argument('--flatprior',action='store_true',
                     help='Use flat priors on all parameters (default is Jeffreys prior)')
-
+parser.add_argument('--varyscaling', type=str,default=None,
+                    help='If provided with second name/column #, then treats second vector as corrections to first, with fitted rescaling of beta')
 args = parser.parse_args()
 fitres=args.fitres
 redshiftfile=args.redshiftfile
 redshiftcolumn=args.zkey
 niter,nchains=args.niter,args.nchains
-redshiftcut= (.0,.08)
+outputdir=args.outputdir
+redshiftcut= (.01,.08)
+rescalebeta=not( args.varyscaling is None)
 pickleoutput='{}_{}_{}.pickle'.format( path.splitext(path.split(fitres)[-1])[0],path.splitext(path.split(redshiftfile)[-1])[0],redshiftcolumn)
+if rescalebeta:
+	pickleoutput="extra_dispersion_"+pickleoutput
+if args.extra_dispersion:
+	pickleoutput="extra_dispersion_"+pickleoutput
 if args.flatprior:
 	pickleoutput='flat_'+pickleoutput
+os.makedirs(outputdir,exist_ok=True)
+pickleoutput=path.join(outputdir,pickleoutput)
 # In[3]:
 
     
@@ -94,11 +110,19 @@ try:
     ncpus = int(os.environ["SLURM_JOB_CPUS_PER_NODE"])
 except KeyError:
     ncpus = multiprocessing.cpu_count()
-
-try:
-    zvector=np.genfromtxt(redshiftfile,skip_header=1)[:,int(redshiftcolumn)]
-except:
-    zvector=np.genfromtxt(redshiftfile,names=True)[redshiftcolumn]
+redshifttable=np.genfromtxt(redshiftfile,names=True)
+def loadzvec(index):
+	try: 
+		retvals=redshifttable[index],index
+	except:
+		name=redshifttable.dtype.names[int(index)]
+		retvals=redshifttable[name],name
+	return retvals
+zvector,evalcolumn=loadzvec(redshiftcolumn)
+if  not rescalebeta:
+	corrections,corrcolumn=zvector.copy(),evalcolumn
+else:
+	corrections,corrcolumn=loadzvec(args.varyscaling)
 zvectornames=readFitres('lowz_comb_csp_hst.fitres')['CID']
 zvectorindices=[]
 i=0
@@ -110,8 +134,10 @@ while i<sndataFull.size and j<zvectornames.size:
         j+=1
     else:
         j+=1
+print(f'Loaded redshift vector \"{evalcolumn}\" and corrections \"{corrcolumn}\"')
 zvectorindices=np.array(zvectorindices)
 sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector[zvectorindices]))
+sndataFull=np.array(recfunctions.append_fields(sndataFull,'zcorrected',corrections[zvectorindices]))
 
 # In[5]:
 
@@ -170,6 +196,7 @@ for i in range(sndata.size):
 
 
 muresiduals=cosmo.distmod(sndata['zeval']).value - sndata['MU']
+mucorrections=(cosmo.distmod(sndata['zeval']) - cosmo.distmod(sndata['zcorrected']) ).value
 
 # In[10]:
 
@@ -181,100 +208,157 @@ velocityprefactor=np.outer(dmudvpec,dmudvpec)
 
 pecvelcov=np.load('velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))
 
-nonlinear=separation<10
-nonlinearmu=velocityprefactor*nonlinear+np.diag(2.5e-6*np.ones(z.size))
-pecvelcovmu=velocityprefactor*pecvelcov+np.diag(2e-20*np.ones(z.size))
+nonlinear=separation==0
+nonlinearmu=velocityprefactor*(nonlinear)
+pecvelcovmu=velocityprefactor*(pecvelcov+np.diag(1e-10*np.ones(z.size)))
+
 assert(linalg.eigvalsh(pecvelcovmu).min()>=0)
 assert(linalg.eigvalsh(nonlinearmu).min()>=0)
 
 
+model_name=''
 # In[13]:
+if args.extra_dispersion:
+	model_name+='extra_veldispersion_'
+	define_additional_params="""
+	    real<lower=10,upper=500> veldispersion_additional;
+"""
+	define_veldispersion="""
+	    real veldispersion=sqrt(square(veldispersion_additional)+square(243*velscaling));
+"""
+	define_sigma="""
+	    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+nonlinearmu*square(veldispersion_additional)+systematics+square(velscaling)*pecvelcovmu;
+"""
+	jeffreys_prior_block="""
+	    real sigparams[3] = {intrins,veldispersion_additional, velscaling};
+	    matrix[N,N] invsigdesigns[3] = {mdivide_left_spd(sigma,diag_matrix(biasscale)),mdivide_left_spd(sigma,nonlinearmu),mdivide_left_spd(sigma,pecvelcovmu)};
+	    matrix[3,3] fishermatrix;
+	    for (i in 1:3){
+		for (j in 1:3){
+		    fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
+		}
+	    }
+	    target+=(.5*log_determinant(fishermatrix));
+"""
+else:
+	define_additional_params="""
+"""
+	define_veldispersion="""
+	    real veldispersion=243*velscaling;
+"""
+	define_sigma="""
+	    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+systematics+square(velscaling)*pecvelcovmu;
+"""
+	jeffreys_prior_block="""
+	    real sigparams[2] = {intrins, velscaling};
+	    matrix[N,N] invsigdesigns[2] = {mdivide_left_spd(sigma,diag_matrix(biasscale)),mdivide_left_spd(sigma,pecvelcovmu)};
+	    matrix[2,2] fishermatrix;
+	    
+	    for (i in 1:2){
+		for (j in 1:2){
+		    fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
+		}
+	    }
+	    target+=(.5*log_determinant(fishermatrix));
+"""
+if not args.flatprior:
+	model_name+='jeffreys_'
 
-
-dataparamblocks="""
-data {
+	prior_block=jeffreys_prior_block
+else:
+	model_name+='flat_'
+	prior_block=''
+if rescalebeta:
+	model_name+='rescale_beta_'
+	define_additional_params+="""
+	    real<lower=-1,upper=2> betarescale;
+"""
+	calculate_residuals="""
+	    muresiduals ~ multi_normal(betarescale*mucorrections+offset, sigma);
+"""
+else:
+	calculate_residuals="""
+	    muresiduals ~ multi_normal(zeros+offset, sigma);
+""" 
+model_name+='model'
+model_code=f"""
+data {{
     int<lower=0> N; // number of SNe
     vector[N] muresiduals;
+    vector[N] mucorrections;
     vector<lower=0>[N] muerr; // s.e. of effect estimates
     vector[N] biasscale;
-    cov_matrix[N] nonlinearmu;
     cov_matrix[N] pecvelcovmu;
+    cov_matrix[N] nonlinearmu;
     matrix[N,N] systematics;
-}
-transformed data{
+}}
+transformed data{{
     vector[N] zeros= rep_vector(0,N);
     cov_matrix[N] identity=diag_matrix(rep_vector(1.0,N));
-}
+}}
 
-parameters {
+parameters {{
     real<multiplier=0.01> offset;
     real<lower=.01,upper=10> velscaling;
-    real<lower=10,upper=500> veldispersion_additional;
     real<lower=.01,upper=.3> intrins;
-}
-transformed parameters {
-    real veldispersion;
-    veldispersion=sqrt(square(veldispersion_additional)+square(243*velscaling));
-}
+    {define_additional_params}
+}}
+transformed parameters {{
+    {define_veldispersion}
+}}
+model {{
+    {define_sigma}
+    {prior_block}
+    {calculate_residuals}
+}}
 """
-
-jeffreyspriors = """
-model {
-    real sigparams[3] = {intrins,veldispersion_additional, velscaling};
-    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+nonlinearmu*square(veldispersion_additional)+systematics+square(velscaling)*pecvelcovmu;
-    matrix[N,N] invsigdesigns[3] = {mdivide_left_spd(sigma,diag_matrix(biasscale)),mdivide_left_spd(sigma,nonlinearmu),mdivide_left_spd(sigma,pecvelcovmu)};
-    matrix[3,3] fishermatrix;
-    
-    muresiduals ~ multi_normal(zeros+offset, sigma);
-    
-    for (i in 1:3){
-        for (j in 1:3){
-            fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
-        }
-    }
-    target+=(.5*log_determinant(fishermatrix));
-}
-"""
-
-flatpriors="""
-model {
-    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+nonlinearmu*square(veldispersion_additional)+systematics+square(velscaling)*pecvelcovmu;
-    muresiduals ~ multi_normal(zeros+offset, sigma);
-}
-"""
-
-
-# In[14]:
-
-if args.flatprior:
-	model = pystan.StanModel(model_code=dataparamblocks+flatpriors,model_name='flatmodel')
+codefile=path.join(outputdir,f'{model_name}.stan')
+if path.exists(codefile):
+	with open(codefile,'r') as file: oldcode=file.read()
+	existingmodelisgood= oldcode==model_code	
 else:
-	model=pystan.StanModel(model_code=dataparamblocks+jeffreyspriors,model_name='jeffreysmodel')
-
-
-# In[15]:
-
+	existingmodelisgood=False
+with open(codefile,'w') as file: file.write(model_code)
 
 cut= (z>redshiftcut[0])&(z<redshiftcut[1])
 standat = {'N': cut.sum(),
                'zeros':np.zeros(cut.sum()),
                'muresiduals': muresiduals[cut],
-               'muerr': sndata['MUERR_RAW'][cut],
+               'mucorrections':mucorrections[cut],
+	       'muerr': sndata['MUERR_RAW'][cut],
                'biasscale':sndata['biasScale_muCOV'][cut],
                'nonlinearmu':nonlinearmu[cut,:][:,cut],
                'systematics': np.zeros((cut.sum(),cut.sum())),
                'pecvelcovmu':pecvelcovmu[cut,:][:,cut],
               }
 
-
-
-
-fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=ncpus,warmup = min(niter//2,1000),init=lambda :{
+modelpickleoutput=path.join(outputdir,f'{model_name}.pickle')
+with open(path.join(outputdir,'data_'+path.basename(pickleoutput)),'wb') as file: pickle.dump(standat,file,-1) 
+if existingmodelisgood and path.exists(modelpickleoutput):
+	print('reloading model from existing file')
+	with open(modelpickleoutput,'rb') as file: model=pickle.load(file) 
+else:
+	print('recompiling model')
+	model = pystan.StanModel(model_code=model_code,model_name=model_name)
+	with open(modelpickleoutput,'wb') as file: pickle.dump(model,file,-1) 
+if args.optimizing:
+	fit = model.optimizing(data=standat,init=lambda :{
     'offset': np.random.normal(0,1e-2),
+    'betarescale': np.exp(np.random.normal(0,.1)),
     'velscaling': np.exp(np.random.normal(0,.1)),
     'veldispersion_additional': np.exp(np.random.normal(np.log(200),.1)),
     'intrins': np.exp(np.random.normal(np.log(.12),.1))
 })
+	print(fit)
+else:
+	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=ncpus,warmup = min(niter//2,1000),init=lambda :{
+    'offset': np.random.normal(0,1e-2),
+    'betarescale': np.exp(np.random.normal(0,.1)),
+    'velscaling': np.exp(np.random.normal(0,.1)),
+    'veldispersion_additional': np.exp(np.random.normal(np.log(200),.1)),
+    'intrins': np.exp(np.random.normal(np.log(.12),.1))
+})
+	print(fit.stansummary())
 
 # In[17]:
 
