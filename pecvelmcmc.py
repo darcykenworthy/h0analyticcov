@@ -261,9 +261,9 @@ if not args.flatprior:
 	    matrix[N,N] invsigdesigns[{nsig}] = {{ {','.join(['mdivide_left_spd(sigma,'+x+')' for x in design])} }};
 	    matrix[{nsig},{nsig}] fishermatrix;
 	    for (i in 1:{nsig}){{
-	    for (j in 1:{nsig}){{
-		fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
-	    }}
+	        for (j in 1:{nsig}){{
+		    fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
+	        }}
 	    }}
 	    target+=(.5*log_determinant(fishermatrix));    
 """

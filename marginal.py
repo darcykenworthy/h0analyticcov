@@ -117,7 +117,7 @@ try:
 except:
 	if directory=='': outdirectory='.'
 	else: outdirectory=directory
-bounds={ 'offset':(-np.inf,np.inf),'betarescale':(0,2),'velscaling':(.01,10),'veldispersion_additional':(10,500),'intrins':(.01,.3)}
+bounds={ 'offset':(-np.inf,np.inf),'betarescale':(-1,2),'velscaling':(.01,10),'veldispersion_additional':(10,500),'intrins':(.01,.3)}
 vars=fit.constrained_param_names()
 bounds=[bounds[x] for x in vars]
 

@@ -91,8 +91,10 @@ parser.add_argument('--outputstem',default=False,
                     help='Add this to the output file name')
 parser.add_argument('--sigrsd',type=float,default=14,
                     help='Redshift space distortion scale in Mpc/h(default is 14, 0 deactivates redshift space distortions)')
-parser.add_argument('--kprecision',type=float,nargs=3,default=[2e-4,2000,2],
+parser.add_argument('--kprecision',type=float,nargs=3,default=[2e-4,2000,10],
                     help='Minimum value of k for integration, number of points, and maximum value of k')
+parser.add_argument('--nonlinear_scale',type=float,default=-1,
+                    help='Splits the integral over k in two at this value in h/Mpc and saves them to output separately. Set to -1 to cancel')
 parser.add_argument('--chunksize',type=int,default=10000,
                     help='Number of covariance matrix elements to calculate in each vectorized operation. Setting this larger may improve performance, but increases memory footprint')
 parser.add_argument('--redshiftrange',type=float,default=[0,20],
@@ -103,7 +105,7 @@ parser.add_argument('--cutdups',action='store_const',
 
 
 args = parser.parse_args()
-
+separatenonlinear=args.nonlinear_scale!=-1
 fitresfile=args.fitresfile
 inifile=args.classfile
 redshiftkey=args.zkey
@@ -117,7 +119,7 @@ minred,maxred=args.redshiftrange
 dummyval=np.nan
 chunksize=args.chunksize
 filenameonly=lambda x: path.splitext(path.split(x)[-1])[0]
-outputstem='-'.join([filenameonly(fitresfile),filenameonly(inifile)])
+outputstem='-'.join([filenameonly(fitresfile),filenameonly(inifile)])+('-separate' if separatenonlinear else '')
 if args.outputstem: outputstem+='-'+args.outputstem
 ##########################################################################################    
 
@@ -202,7 +204,10 @@ k,dlog10k,pk_nl_dlog10k=calc_pk_nl_dlog10k(*kprecision,sig_rsd,0)
 calculatelements=np.ones(separation.shape,dtype=bool)
 calculatelements[np.tril_indices(z.size,-1)]=False
 print('Calculating velocity covariance matrix')
-integralterm=np.ones((z.size,z.size))*dummyval
+if separatenonlinear:
+	integralterm=np.ones((2,z.size,z.size))*dummyval
+else:
+	integralterm=np.ones((z.size,z.size))*dummyval
 calculateindices=np.where(calculatelements)
 numchunks=ceil(calculateindices[0].size/chunksize)
 print('{} elements to calculate in {} chunks'.format(calculateindices[0].size,numchunks))
@@ -232,16 +237,27 @@ for i in trange(numchunks):
 	series= (-wdwdutimeswdwdv * (wsq*sinw+3*wcoswlesssinw) - wcoswlesssinw*(wsq*cosa ))/w**5
 	series[w==0]=1./3
 	#integrate over the power spectrum dlogk
-	elements=(series*pk_nl_dlog10k[:,np.newaxis]).sum(axis=0)*dlog10k/(2*np.pi**2)
-
-	integralterm[chunkindices]=elements
-	integralterm.T[chunkindices]=elements
+	if separatenonlinear:
+		integrand=series*pk_nl_dlog10k[:,np.newaxis]
+		elements=([(integrand[k<args.nonlinear_scale,:] ).sum(axis=0)*dlog10k/(2*np.pi**2),(integrand[k>=args.nonlinear_scale,:] ).sum(axis=0)*dlog10k/(2*np.pi**2)])
+		integralterm[np.tile(0,chunkindices[0].size),chunkindices[0],chunkindices[1]]=elements[0]
+		integralterm[np.tile(0,chunkindices[0].size),chunkindices[1],chunkindices[0]]=elements[0]
+		integralterm[np.tile(1,chunkindices[0].size),chunkindices[0],chunkindices[1]]=elements[1]
+		integralterm[np.tile(1,chunkindices[0].size),chunkindices[1],chunkindices[0]]=elements[1]
+	else:
+		elements=(series*pk_nl_dlog10k[:,np.newaxis]).sum(axis=0)*dlog10k/(2*np.pi**2)
+		integralterm[0,chunkindices]=elements
+		integralterm.T[0,chunkindices]=elements
+		
 velcovoutput='velocitycovariance-{}.npy'.format(outputstem)
 namelistoutput='snnames-{}.list'.format(outputstem)
 distanceprefactor=D*f * (1+z)/ D_L * 5 /np.log(10)
 #Convert dDdtau from dimensionless to km/s
 velocityprefactor=dDdtau*constants.c/1e3
-velocitycovariance=np.outer(velocityprefactor,velocityprefactor)*integralterm
+if separatenonlinear:
+	velocitycovariance=np.outer(velocityprefactor,velocityprefactor)[np.newaxis,:,:]*integralterm
+else:
+	velocitycovariance=np.outer(velocityprefactor,velocityprefactor)*integralterm
 print(f'Saving velocity covariance to {velcovoutput} and names of SNe in same order to {namelistoutput}')
 np.save(velcovoutput,velocitycovariance)
 np.save(namelistoutput,sndata['CID'])
