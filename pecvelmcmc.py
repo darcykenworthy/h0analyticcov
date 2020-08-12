@@ -44,6 +44,8 @@ parser.add_argument('--optimizing',action='store_true',
                     help='Useful for debugging: don\'t run mcmc, instead just return mode of posterior')
 parser.add_argument('--flatprior',action='store_true',
                     help='Use flat priors on all parameters (default is Jeffreys prior)')
+parser.add_argument('--fixcovariance', action='store_true',
+                    help='Fix the scale of the peculiar velocity covariance matrix to 1')
 parser.add_argument('--varyscaling', type=str,default=None,
                     help='If provided with second name/column #, then treats second vector as corrections to first, with fitted rescaling of beta')
 args = parser.parse_args()
@@ -215,7 +217,7 @@ pecvelcovmu=velocityprefactor*(pecvelcov+np.diag(1e-10*np.ones(z.size)))
 assert(linalg.eigvalsh(pecvelcovmu).min()>=0)
 assert(linalg.eigvalsh(nonlinearmu).min()>=0)
 
-
+define_additional_constants=''
 model_name=''
 # In[13]:
 if args.extra_dispersion:
@@ -229,17 +231,7 @@ if args.extra_dispersion:
 	define_sigma="""
 	    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+nonlinearmu*square(veldispersion_additional)+systematics+square(velscaling)*pecvelcovmu;
 """
-	jeffreys_prior_block="""
-	    real sigparams[3] = {intrins,veldispersion_additional, velscaling};
-	    matrix[N,N] invsigdesigns[3] = {mdivide_left_spd(sigma,diag_matrix(biasscale)),mdivide_left_spd(sigma,nonlinearmu),mdivide_left_spd(sigma,pecvelcovmu)};
-	    matrix[3,3] fishermatrix;
-	    for (i in 1:3){
-		for (j in 1:3){
-		    fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
-		}
-	    }
-	    target+=(.5*log_determinant(fishermatrix));
-"""
+
 else:
 	define_additional_params="""
 """
@@ -249,22 +241,32 @@ else:
 	define_sigma="""
 	    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+systematics+square(velscaling)*pecvelcovmu;
 """
-	jeffreys_prior_block="""
-	    real sigparams[2] = {intrins, velscaling};
-	    matrix[N,N] invsigdesigns[2] = {mdivide_left_spd(sigma,diag_matrix(biasscale)),mdivide_left_spd(sigma,pecvelcovmu)};
-	    matrix[2,2] fishermatrix;
-	    
-	    for (i in 1:2){
-		for (j in 1:2){
-		    fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
-		}
-	    }
-	    target+=(.5*log_determinant(fishermatrix));
+
+if args.fixcovariance:
+	model_name+='fixedpeccov_'
+	define_additional_constants+="""
+	    real<lower=.01,upper=10> velscaling=1;
+"""
+else:
+	define_additional_params+="""
+	    real<lower=.01,upper=10> velscaling;
 """
 if not args.flatprior:
 	model_name+='jeffreys_'
-
-	prior_block=jeffreys_prior_block
+	sigparams,design= zip(*[('intrins','diag_matrix(biasscale)')] + ([('veldispersion_additional','nonlinearmu')] if args.extra_dispersion else []) + ([] if args.fixcovariance else [('velscaling','pecvelcovmu')]))
+	nsig= len(sigparams) 
+	
+	prior_block=f"""
+	    real sigparams[{nsig}] = {{ { ','.join(sigparams) }  }};
+	    matrix[N,N] invsigdesigns[{nsig}] = {{ {','.join(['mdivide_left_spd(sigma,'+x+')' for x in design])} }};
+	    matrix[{nsig},{nsig}] fishermatrix;
+	    for (i in 1:{nsig}){{
+	    for (j in 1:{nsig}){{
+		fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
+	    }}
+	    }}
+	    target+=(.5*log_determinant(fishermatrix));    
+"""
 else:
 	model_name+='flat_'
 	prior_block=''
@@ -295,11 +297,11 @@ data {{
 transformed data{{
     vector[N] zeros= rep_vector(0,N);
     cov_matrix[N] identity=diag_matrix(rep_vector(1.0,N));
+    {define_additional_constants}
 }}
 
 parameters {{
     real<multiplier=0.01> offset;
-    real<lower=.01,upper=10> velscaling;
     real<lower=.01,upper=.3> intrins;
     {define_additional_params}
 }}
@@ -341,23 +343,18 @@ else:
 	print('recompiling model')
 	model = pystan.StanModel(model_code=model_code,model_name=model_name)
 	with open(modelpickleoutput,'wb') as file: pickle.dump(model,file,-1) 
-if args.optimizing:
-	fit = model.optimizing(data=standat,init=lambda :{
+initfun=lambda :{
     'offset': np.random.normal(0,1e-2),
     'betarescale': np.exp(np.random.normal(0,.1)),
     'velscaling': np.exp(np.random.normal(0,.1)),
     'veldispersion_additional': np.exp(np.random.normal(np.log(200),.1)),
     'intrins': np.exp(np.random.normal(np.log(.12),.1))
-})
+}
+if args.optimizing:
+	fit = model.optimizing(data=standat,init=initfun)
 	print(fit)
 else:
-	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=ncpus,warmup = min(niter//2,1000),init=lambda :{
-    'offset': np.random.normal(0,1e-2),
-    'betarescale': np.exp(np.random.normal(0,.1)),
-    'velscaling': np.exp(np.random.normal(0,.1)),
-    'veldispersion_additional': np.exp(np.random.normal(np.log(200),.1)),
-    'intrins': np.exp(np.random.normal(np.log(.12),.1))
-})
+	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=ncpus,warmup = min(niter//2,1000),init=initfun)
 	print(fit.stansummary())
 
 # In[17]:
