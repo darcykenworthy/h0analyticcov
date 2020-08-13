@@ -46,8 +46,10 @@ parser.add_argument('--flatprior',action='store_true',
                     help='Use flat priors on all parameters (default is Jeffreys prior)')
 parser.add_argument('--fixcovariance', action='store_true',
                     help='Fix the scale of the peculiar velocity covariance matrix to 1')
-parser.add_argument('--varyscaling', type=str,default=None,
-                    help='If provided with second name/column #, then treats second vector as corrections to first, with fitted rescaling of beta')
+parser.add_argument('--varyscaling', action='store_true', 
+                    help='Vary the overall scale of 2m++ corrections')
+parser.add_argument('--groupsonly', action='store_true', 
+                    help='If true, only use supernovae whose redshifts are different from those in the 2m++ column')
 args = parser.parse_args()
 fitres=args.fitres
 redshiftfile=args.redshiftfile
@@ -55,10 +57,10 @@ redshiftcolumn=args.zkey
 niter,nchains=args.niter,args.nchains
 outputdir=args.outputdir
 redshiftcut= (.01,.08)
-rescalebeta=not( args.varyscaling is None)
+rescalebeta=( args.varyscaling )
 pickleoutput='{}_{}_{}.pickle'.format( path.splitext(path.split(fitres)[-1])[0],path.splitext(path.split(redshiftfile)[-1])[0],redshiftcolumn)
 if rescalebeta:
-	pickleoutput="extra_dispersion_"+pickleoutput
+	pickleoutput="rescalebeta_"+pickleoutput
 if args.extra_dispersion:
 	pickleoutput="extra_dispersion_"+pickleoutput
 if args.flatprior:
@@ -112,6 +114,7 @@ try:
     ncpus = int(os.environ["SLURM_JOB_CPUS_PER_NODE"])
 except KeyError:
     ncpus = multiprocessing.cpu_count()
+print(ncpus)
 redshifttable=np.genfromtxt(redshiftfile,names=True)
 def loadzvec(index):
 	try: 
@@ -121,10 +124,6 @@ def loadzvec(index):
 		retvals=redshifttable[name],name
 	return retvals
 zvector,evalcolumn=loadzvec(redshiftcolumn)
-if  not rescalebeta:
-	corrections,corrcolumn=zvector.copy(),evalcolumn
-else:
-	corrections,corrcolumn=loadzvec(args.varyscaling)
 zvectornames=readFitres('lowz_comb_csp_hst.fitres')['CID']
 zvectorindices=[]
 i=0
@@ -136,10 +135,14 @@ while i<sndataFull.size and j<zvectornames.size:
         j+=1
     else:
         j+=1
-print(f'Loaded redshift vector \"{evalcolumn}\" and corrections \"{corrcolumn}\"')
+print(f'Loaded redshift vector \"{evalcolumn}\"')
 zvectorindices=np.array(zvectorindices)
 sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector[zvectorindices]))
-sndataFull=np.array(recfunctions.append_fields(sndataFull,'zcorrected',corrections[zvectorindices]))
+if evalcolumn=='lowz_comb_csp_hst':
+	isgroup=~(zvector==redshifttable['tully_avg'])
+else:
+	isgroup=~(zvector == redshifttable['lowz_comb_csp_hst'])
+sndataFull=np.array(recfunctions.append_fields(sndataFull,'isgroup',isgroup[zvectorindices]))
 
 # In[5]:
 
@@ -198,8 +201,7 @@ for i in range(sndata.size):
 
 
 muresiduals=cosmo.distmod(sndata['zeval']).value - sndata['MU']
-mucorrections=(cosmo.distmod(sndata['zeval']) - cosmo.distmod(sndata['zcorrected']) ).value
-
+mucorrections=(cosmo.distmod(sndata['zCMB']) - cosmo.distmod(sndata['zHD']) ).value
 # In[10]:
 
 
@@ -323,6 +325,8 @@ else:
 with open(codefile,'w') as file: file.write(model_code)
 
 cut= (z>redshiftcut[0])&(z<redshiftcut[1])
+if args.groupsonly:
+	cut=cut&sndata['isgroup']
 standat = {'N': cut.sum(),
                'zeros':np.zeros(cut.sum()),
                'muresiduals': muresiduals[cut],
@@ -350,15 +354,14 @@ initfun=lambda :{
     'veldispersion_additional': np.exp(np.random.normal(np.log(200),.1)),
     'intrins': np.exp(np.random.normal(np.log(.12),.1))
 }
-if args.optimizing:
-	fit = model.optimizing(data=standat,init=initfun)
-	print(fit)
-else:
+opfit = model.optimizing(data=standat,init=initfun)
+print(opfit)
+if not args.optimizing:
 	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=ncpus,warmup = min(niter//2,1000),init=initfun)
 	print(fit.stansummary())
+	with open(pickleoutput,'wb') as picklefile: pickle.dump([model,fit,opfit],picklefile,-1)
 
 # In[17]:
 
 
-with open(pickleoutput,'wb') as picklefile: pickle.dump([model,fit],picklefile,-1)
 

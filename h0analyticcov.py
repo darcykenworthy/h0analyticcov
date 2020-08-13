@@ -5,7 +5,6 @@ from scipy.special import spherical_jn,legendre
 from scipy import constants,stats
 import matplotlib.pyplot as plt
 import numpy as np
-import sympy
 
 from astropy.coordinates import SkyCoord
 from astropy import units as units

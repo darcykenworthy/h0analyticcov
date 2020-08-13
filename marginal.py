@@ -8,15 +8,14 @@ import pickle,os
 import numpy as np
 import tqdm
 from scipy import linalg,stats
-import sys
+import sys,os
 from os import path
 # In[2]:
 
 
-
-def Marginal_llk(fit,vars,bounds):
+# This is based on the code found at https://gist.github.com/junpenglao/4d2669d69ddfe1d788318264cdcf0583
+def Marginal_llk(fit,logp,vars,bounds):
     r0, tol1, tol2 = 0.5, 1e-10, 1e-4
-    logp=lambda x: fit.log_prob(fit.unconstrain_pars({var:val for var,val in zip(vars,x)}))
     mtrace= np.array([fit.extract(var)[var] for var in vars]).T
     # Split the samples into two parts  
     # Use the first 50% for fiting the proposal distribution and the second 50% 
@@ -63,7 +62,7 @@ def Marginal_llk(fit,vars,bounds):
     q22 = stats.multivariate_normal.logpdf(gen_samples.T, m, V)-np.log(goodfrac)
 
     # Evaluate unnormalized posterior for posterior & generated samples
-    q11 = fit.extract(pars='lp__')['lp__'][N1:]
+    q11 = np.asarray([logp(point) for point in tqdm.tqdm(samples_4_iter.T)])
     q21 = np.asarray([logp(point) for point in tqdm.tqdm(gen_samples.T)])
     def iterative_scheme(q11, q12, q21, q22, r0, neff, tol, maxiter, criterion):
         l1 = q11 - q12
@@ -110,22 +109,28 @@ def Marginal_llk(fit,vars,bounds):
     return dict(logml = tmp['logml'], niter = tmp['niter'], method = "normal", 
                 q11 = q11, q12 = q12, q21 = q21, q22 = q22)
 
-with open(sys.argv[1],'rb') as file: model,fit=pickle.load(file)
+with open(sys.argv[1],'rb') as file: model,fit,opfit=pickle.load(file)
 directory,base=path.split(sys.argv[1])
 try: 
 	outdirectory=sys.argv[2]
 except:
 	if directory=='': outdirectory='.'
 	else: outdirectory=directory
+os.makedirs(outdirectory,exist_ok=True)
 bounds={ 'offset':(-np.inf,np.inf),'betarescale':(-1,2),'velscaling':(.01,10),'veldispersion_additional':(10,500),'intrins':(.01,.3)}
 vars=fit.constrained_param_names()
 bounds=[bounds[x] for x in vars]
+logp=lambda x: fit.log_prob(fit.unconstrain_pars({var:val for var,val in zip(vars,x)}),adjust_transform=False)
 
 # In[4]:
-result=Marginal_llk(fit,vars,bounds)
+result=Marginal_llk(fit,logp,vars,bounds)
 result['pars']=fit.extract()
-with open(outdirectory+'/marginal_'+base,'wb') as file: pickle.dump(result,file)
-
+mtrace= np.array([fit.extract(var)[var] for var in vars]).T
+result['pars']['lp__']=np.asarray([logp(point) for point in tqdm.tqdm(mtrace)])
+result['maxposterior']=opfit
+result['maxposterior']['lp__']=fit.log_prob(fit.unconstrain_pars(opfit),adjust_transform=False)
+with open(path.join(outdirectory,'marginal_'+base),'wb') as file: pickle.dump(result,file)
+print(f"marginal likelihood is {result['logml']}")
 
 # In[ ]:
 
