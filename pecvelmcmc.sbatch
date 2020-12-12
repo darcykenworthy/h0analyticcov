@@ -13,5 +13,5 @@
 # Print the task id.
 echo "My SLURM_ARRAY_TASK_ID: " $SLURM_ARRAY_TASK_ID
 source activate pystan
-python pecvelmcmc.py "$1" "$2" "$SLURM_ARRAY_TASK_ID" --niter "$3" --nchains 4 "${@:4}"
+python pecvelmcmc.py "$1" "$2" "$SLURM_ARRAY_TASK_ID" --nchains 4 "${@:3}"
 

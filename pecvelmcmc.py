@@ -50,6 +50,12 @@ parser.add_argument('--varyscaling', action='store_true',
                     help='Vary the overall scale of 2m++ corrections')
 parser.add_argument('--groupsonly', action='store_true', 
                     help='If true, only use supernovae whose redshifts are different from those in the 2m++ column')
+parser.add_argument('--posteriorpredictive', default=None,type=str,
+                    help='Path to pickle file with simulated samples and values. If provided, these override muresiduals from fitres and redshift file')
+parser.add_argument('--sampleprior', action='store_true', 
+                    help='Sample directly from prior distribution without constraints from data')
+parser.add_argument('--clobber', action='store_true', 
+                    help='Overwrite existing final output file')
 args = parser.parse_args()
 fitres=args.fitres
 redshiftfile=args.redshiftfile
@@ -58,6 +64,7 @@ niter,nchains=args.niter,args.nchains
 outputdir=args.outputdir
 redshiftcut= (.01,.08)
 rescalebeta=( args.varyscaling )
+isposteriorpredictivecheck=( not args.posteriorpredictive is None)
 pickleoutput='{}_{}_{}.pickle'.format( path.splitext(path.split(fitres)[-1])[0],path.splitext(path.split(redshiftfile)[-1])[0],redshiftcolumn)
 if rescalebeta:
 	pickleoutput="rescalebeta_"+pickleoutput
@@ -65,8 +72,14 @@ if args.extra_dispersion:
 	pickleoutput="extra_dispersion_"+pickleoutput
 if args.flatprior:
 	pickleoutput='flat_'+pickleoutput
+if args.sampleprior:
+	pickleoutput='prior_'+pickleoutput
+elif args.posteriorpredictive:
+	pickleoutput='posteriorpredictive_'+pickleoutput	
 os.makedirs(outputdir,exist_ok=True)
 pickleoutput=path.join(outputdir,pickleoutput)
+if path.exists(pickleoutput) and not args.clobber and not args.optimizing:
+	raise ValueError('Clobber is false and output file already exists')
 # In[3]:
 
     
@@ -123,7 +136,11 @@ def loadzvec(index):
 		name=redshifttable.dtype.names[int(index)]
 		retvals=redshifttable[name],name
 	return retvals
-zvector,evalcolumn=loadzvec(redshiftcolumn)
+if args.posteriorpredictive:
+        zvector,evalcolumn=np.zeros(redshifttable.size),'NULL'
+else :
+        zvector,evalcolumn=loadzvec(redshiftcolumn)
+
 zvectornames=readFitres('lowz_comb_csp_hst.fitres')['CID']
 zvectorindices=[]
 i=0
@@ -198,9 +215,13 @@ for i in range(sndata.size):
 
 
 # In[8]:
+if isposteriorpredictivecheck:
+        with open(args.posteriorpredictive,'rb') as file: musamples,parsamples=pickle.load(file)
+        simmedmuresiduals=musamples[:,int(args.zkey)]
+        simmedparams=parsamples[int(args.zkey)]
+else:
+        muresiduals=cosmo.distmod(sndata['zeval']).value - sndata['MU']
 
-
-muresiduals=cosmo.distmod(sndata['zeval']).value - sndata['MU']
 mucorrections=(cosmo.distmod(sndata['zCMB']) - cosmo.distmod(sndata['zHD']) ).value
 # In[10]:
 
@@ -284,6 +305,11 @@ else:
 	calculate_residuals="""
 	    muresiduals ~ multi_normal(zeros+offset, sigma);
 """ 
+
+if args.sampleprior:
+	model_name='prior_'+model_name
+	calculate_residuals="" 
+
 model_name+='model'
 model_code=f"""
 data {{
@@ -303,7 +329,7 @@ transformed data{{
 }}
 
 parameters {{
-    real<multiplier=0.01> offset;
+    real<lower=-.3,upper=.3> offset;
     real<lower=.01,upper=.3> intrins;
     {define_additional_params}
 }}
@@ -329,7 +355,7 @@ if args.groupsonly:
 	cut=cut&sndata['isgroup']
 standat = {'N': cut.sum(),
                'zeros':np.zeros(cut.sum()),
-               'muresiduals': muresiduals[cut],
+               'muresiduals': simmedmuresiduals if args.posteriorpredictive else muresiduals[cut],
                'mucorrections':mucorrections[cut],
 	       'muerr': sndata['MUERR_RAW'][cut],
                'biasscale':sndata['biasScale_muCOV'][cut],
@@ -356,6 +382,8 @@ initfun=lambda :{
 }
 opfit = model.optimizing(data=standat,init=initfun)
 print(opfit)
+if args.posteriorpredictive:
+        print('Posterior produced with parameters :',{x:simmedparams[x] for x in opfit})
 if not args.optimizing:
 	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=ncpus,warmup = min(niter//2,1000),init=initfun)
 	print(fit.stansummary())

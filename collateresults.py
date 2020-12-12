@@ -20,8 +20,9 @@ def constructtable(redshiftsfile,directory='.'):
 					name='_'.join(filenamesplit[-1-i:])
 					if name in names: break
 			logprob=result['maxposterior']['lp__']
-			rows+=[(name, result['logml'], *[np.median(result['pars'][x]) for x in result['pars'] if x!= 'lp__'],logprob,*[(result['maxposterior'][x]) for x in result['maxposterior'] if x!= 'lp__'])]
-	newnames=['Name','Bayes Factor'] +['Median '+x for x in result['pars'] if x!= 'lp__']+['Mode of posterior']+['Maximum a posteriori '+x for x in result['pars'] if x!= 'lp__']
+			rows+=[(name, result['logml'],  *[np.percentile(result['pars'][x],16) for x in result['pars'] if x!= 'lp__'],*[np.median(result['pars'][x]) for x in result['pars'] if x!= 'lp__'],*[np.percentile(result['pars'][x],84) for x in result['pars'] if x!= 'lp__'],logprob,*[(result['maxposterior'][x]) for x in result['maxposterior'] if x!= 'lp__'])]
+	newnames=['Name','Bayes Factor'] +['16 %tile '+x for x in result['pars'] if x!= 'lp__']+ ['Median '+x for x in result['pars'] if x!= 'lp__']+['84 %tile '+x for x in result['pars'] if x!= 'lp__']+['Mode of posterior']+['Maximum a posteriori '+x for x in result['pars'] if x!= 'lp__']
+
 	rows=sorted(rows,key=lambda x: names.index(x[0]) if x[0] in names else 0 )
 	table=np.array(rows, dtype=list(zip(newnames,['U20' if i==0 else float for i in range(len(newnames))])))
 	return table
