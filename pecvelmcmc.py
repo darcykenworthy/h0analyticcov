@@ -44,6 +44,8 @@ parser.add_argument('--optimizing',action='store_true',
                     help='Useful for debugging: don\'t run mcmc, instead just return mode of posterior')
 parser.add_argument('--flatprior',action='store_true',
                     help='Use flat priors on all parameters (default is Jeffreys prior)')
+parser.add_argument('--fixuncorrectedcovariance', action='store_true', 
+                    help='Fix the scale of the peculiar velocity covariance to 1 for all SNe without a peculiar velocity correction')
 parser.add_argument('--fixcovariance', action='store_true',
                     help='Fix the scale of the peculiar velocity covariance matrix to 1')
 parser.add_argument('--varyscaling', action='store_true', 
@@ -243,6 +245,21 @@ assert(linalg.eigvalsh(nonlinearmu).min()>=0)
 define_additional_constants=''
 model_name=''
 # In[13]:
+
+
+if args.fixuncorrectedcovariance:
+	modelname+='uncorrectedfixed_'
+	define_additional_data="""
+	matrix[N,N] pecvelcovmuonecorrected;
+	matrix[N,N] pecvelcovmuuncorrected;
+"""
+	define_sigma=""" matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+systematics+square(velscaling)*pecvelcovmu + velscaling *pecvelcovmuonecorrected + pecvelcovmuuncorrected"""
+
+else:
+	define_sigma=""" matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+systematics+square(velscaling)*pecvelcovmu"""
+
+
+
 if args.extra_dispersion:
 	model_name+='extra_veldispersion_'
 	define_additional_params="""
@@ -251,18 +268,12 @@ if args.extra_dispersion:
 	define_veldispersion="""
 	    real veldispersion=sqrt(square(veldispersion_additional)+square(243*velscaling));
 """
-	define_sigma="""
-	    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+nonlinearmu*square(veldispersion_additional)+systematics+square(velscaling)*pecvelcovmu;
-"""
-
+	define_sigma=define_sigma+'+nonlinearmu*square(veldispersion_additional)'
 else:
 	define_additional_params="""
 """
 	define_veldispersion="""
 	    real veldispersion=243*velscaling;
-"""
-	define_sigma="""
-	    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+systematics+square(velscaling)*pecvelcovmu;
 """
 
 if args.fixcovariance:
@@ -276,7 +287,8 @@ else:
 """
 if not args.flatprior:
 	model_name+='jeffreys_'
-	sigparams,design= zip(*[('intrins','diag_matrix(biasscale)')] + ([('veldispersion_additional','nonlinearmu')] if args.extra_dispersion else []) + ([] if args.fixcovariance else [('velscaling','pecvelcovmu')]))
+	sigparams,design= zip(*[('intrins','intrins*diag_matrix(biasscale)')] + ([('veldispersion_additional','veldispersion_additional*nonlinearmu')] if args.extra_dispersion else []) + ([] if args.fixcovariance else [
+	('velscaling', '2 *(velscaling)*pecvelcovmu + pecvelcovmuonecorrected' if args.fixuncorrectedcovariance else 'velscaling*pecvelcovmu')]))
 	nsig= len(sigparams) 
 	
 	prior_block=f"""
@@ -285,7 +297,7 @@ if not args.flatprior:
 	    matrix[{nsig},{nsig}] fishermatrix;
 	    for (i in 1:{nsig}){{
 	        for (j in 1:{nsig}){{
-		    fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
+		    fishermatrix[i,j]=  sum(invsigdesigns[i].*invsigdesigns[j]);
 	        }}
 	    }}
 	    target+=(.5*log_determinant(fishermatrix));    
@@ -318,9 +330,10 @@ data {{
     vector[N] mucorrections;
     vector<lower=0>[N] muerr; // s.e. of effect estimates
     vector[N] biasscale;
-    cov_matrix[N] pecvelcovmu;
-    cov_matrix[N] nonlinearmu;
+    matrix[N,N] pecvelcovmu;
+    matrix[N,N] nonlinearmu;
     matrix[N,N] systematics;
+    {define_additional_data}
 }}
 transformed data{{
     vector[N] zeros= rep_vector(0,N);
@@ -337,7 +350,7 @@ transformed parameters {{
     {define_veldispersion}
 }}
 model {{
-    {define_sigma}
+    {define_sigma};
     {prior_block}
     {calculate_residuals}
 }}
@@ -363,6 +376,16 @@ standat = {'N': cut.sum(),
                'systematics': np.zeros((cut.sum(),cut.sum())),
                'pecvelcovmu':pecvelcovmu[cut,:][:,cut],
               }
+if args.fixuncorrectedcovariance:
+	cutpecvelcovmu=pecvelcovmu[cut,:][:,cut]
+	uncorrected=mucorrections==0
+	bothcorrected=( (~uncorrected[:,np.newaxis]) & (~uncorrected[:,np.newaxis])  )
+	neithercorrected=( (uncorrected[:,np.newaxis]) & (uncorrected[:,np.newaxis])  )
+	onecorrected=~ (neithercorrected | bothcorrected)
+	print(f'{uncorrected.sum()} SNe with no correction and {uncorrected.size-uncorrected.sum()} SNe with correction')
+	standat['pecvelcovmu']=cutpecvelcovmu * bothcorrected
+	standat['pecvelcovmuonecorrected']=cutpecvelcovmu*onecorrected
+	standat['pecvelcovmuuncorrected']= cutpecvelcovmu *neithercorrected
 
 modelpickleoutput=path.join(outputdir,f'{model_name}.pickle')
 with open(path.join(outputdir,'data_'+path.basename(pickleoutput)),'wb') as file: pickle.dump(standat,file,-1) 
