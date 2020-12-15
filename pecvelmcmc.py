@@ -28,7 +28,7 @@ cosmo=Planck15
 parser = argparse.ArgumentParser(description='Calculate velocity covariance between supernovae from fitres file')
 parser.add_argument('fitres',type=str, 
                     help='File with supernova distances')
-parser.add_argument('redshiftfile',type=str, 
+parser.add_argument('redshiftfile',type=str,
                     help='File with supernova redshifts in labeled columns')
 parser.add_argument('zkey',type=str,
                     help='Name (or column) of the redshift column to be used for this run')
@@ -128,38 +128,43 @@ try:
 except KeyError:
     ncpus = multiprocessing.cpu_count()
 print(ncpus)
-redshifttable=np.genfromtxt(redshiftfile,names=True)
-def loadzvec(index):
-	try: 
-		retvals=redshifttable[index],index
-	except:
-		name=redshifttable.dtype.names[int(index)]
-		retvals=redshifttable[name],name
-	return retvals
-if args.posteriorpredictive:
-        zvector,evalcolumn=np.zeros(redshifttable.size),'NULL'
-else :
-        zvector,evalcolumn=loadzvec(redshiftcolumn)
-
-zvectornames=readFitres('lowz_comb_csp_hst.fitres')['CID']
-zvectorindices=[]
-i=0
-j=0
-while i<sndataFull.size and j<zvectornames.size:
-    if sndataFull['CID'][i]==zvectornames[j]:
-        zvectorindices+=[j]
-        i+=1
-        j+=1
-    else:
-        j+=1
-print(f'Loaded redshift vector \"{evalcolumn}\"')
-zvectorindices=np.array(zvectorindices)
-sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector[zvectorindices]))
-if evalcolumn=='lowz_comb_csp_hst':
-	isgroup=~(zvector==redshifttable['tully_avg'])
+if redshiftfile.lower().endswith('.fitres'):
+	zvector,evalcolumn=readFitres(redshiftfile)[redshiftcolumn],redshiftcolumn
+	sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector))
+	sndataFull=np.array(recfunctions.append_fields(sndataFull,'isgroup',np.tile(False,zvector.size)))
 else:
-	isgroup=~(zvector == redshifttable['lowz_comb_csp_hst'])
-sndataFull=np.array(recfunctions.append_fields(sndataFull,'isgroup',isgroup[zvectorindices]))
+	redshifttable=np.genfromtxt(redshiftfile,names=True)
+	def loadzvec(index):
+		try: 
+			retvals=redshifttable[index],index
+		except:
+			name=redshifttable.dtype.names[int(index)]
+			retvals=redshifttable[name],name
+		return retvals
+	if args.posteriorpredictive:
+		zvector,evalcolumn=np.zeros(redshifttable.size),'NULL'
+	else :
+		zvector,evalcolumn=loadzvec(redshiftcolumn)
+
+	zvectornames=readFitres('lowz_comb_csp_hst.fitres')['CID']
+	zvectorindices=[]
+	i=0
+	j=0
+	while i<sndataFull.size and j<zvectornames.size:
+		if sndataFull['CID'][i]==zvectornames[j]:
+			zvectorindices+=[j]
+			i+=1
+			j+=1
+		else:
+			j+=1
+	print(f'Loaded redshift vector \"{evalcolumn}\"')
+	zvectorindices=np.array(zvectorindices)
+	if evalcolumn=='lowz_comb_csp_hst':
+		isgroup=~(zvector==redshifttable['tully_avg'])
+	else:
+		isgroup=~(zvector == redshifttable['lowz_comb_csp_hst'])
+	sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector[zvectorindices]))
+	sndataFull=np.array(recfunctions.append_fields(sndataFull,'isgroup',isgroup[zvectorindices]))
 
 # In[5]:
 
@@ -197,8 +202,8 @@ sndata=sndataNoDups.copy()
 
 zcmb=sndata['zCMB']
 snra=sndata['RA']*u.degree
-sndec=sndata['DECL']*u.degree
-sncoords=SkyCoord(ra=sndata['RA'],dec=sndata['DECL'],unit=u.deg)
+sndec=sndata['DEC']*u.degree
+sncoords=SkyCoord(ra=sndata['RA'],dec=sndata['DEC'],unit=u.deg)
 
 chi=cosmo.comoving_distance(zcmb).to(u.Mpc).value
 snpos=np.zeros((sndata.size,3))
