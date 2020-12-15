@@ -175,9 +175,9 @@ chi=bg.comoving_distance(z)
 dDdtau=H*D*f/(1+z)
 
 #Define SN coordinates on the sky
-sncoords=SkyCoord(ra=sndata['RA'],dec=sndata['DECL'],unit=units.deg)
+sncoords=SkyCoord(ra=sndata['RA'],dec=sndata['DEC'],unit=units.deg)
 snra=sndata['RA']*units.degree
-sndec=sndata['DECL']*units.degree
+sndec=sndata['DEC']*units.degree
 
 #Calculate comoving positions
 snpos=np.zeros((z.size,3))
@@ -220,10 +220,11 @@ for i in trange(numchunks):
 	u=k[:,np.newaxis]*chi[chunkindices[0]][np.newaxis,:]
 	v=k[:,np.newaxis]*chi[chunkindices[1]][np.newaxis,:]
 	w=k[:,np.newaxis]*separation[chunkindices][np.newaxis,:]
-	
 	#Convert to rad from deg
-	cosa=np.cos(angsep[chunkindices]*np.pi/180)[np.newaxis,:]
-
+	cosa=np.cos(angsep[chunkindices]*np.pi/180)[np.newaxis,:]*np.ones((k.size,1))
+	#Exclude all the ones that are the same position as those reduce to 1/3
+	nosep=w==0
+	u,v,w,cosa=u[~nosep],v[~nosep],w[~nosep],cosa[~nosep]
 	#Make sure I'm not wasting function evaluations
 	wdwdu=u-v*cosa
 	wdwdv=v-u*cosa
@@ -233,8 +234,9 @@ for i in trange(numchunks):
 	wcoswlesssinw=w*cosw-sinw
 	wsq=w**2
 	#Calculate the series over Bessell functions (this relation corresponds to d^2 sinc(w) / du dv) (as the separation, w^2=u^2+v^2-2 uv cos(alpha))
-	series= (-wdwdutimeswdwdv * (wsq*sinw+3*wcoswlesssinw) - wcoswlesssinw*(wsq*cosa ))/w**5
-	series[w==0]=1./3
+	series=np.empty(nosep.shape)
+	series[nosep]=1./3
+	series[~nosep]= (-wdwdutimeswdwdv * (wsq*sinw+3*wcoswlesssinw) - wcoswlesssinw*(wsq*cosa ))/w**5
 	#integrate over the power spectrum dlogk
 	if separatenonlinear:
 		integrand=series*pk_nl_dlog10k[:,np.newaxis]
@@ -245,11 +247,11 @@ for i in trange(numchunks):
 		integralterm[np.tile(1,chunkindices[0].size),chunkindices[1],chunkindices[0]]=elements[1]
 	else:
 		elements=(series*pk_nl_dlog10k[:,np.newaxis]).sum(axis=0)*dlog10k/(2*np.pi**2)
-		integralterm[0,chunkindices]=elements
-		integralterm.T[0,chunkindices]=elements
+		integralterm[chunkindices]=elements
+		integralterm.T[chunkindices]=elements
 		
 velcovoutput='velocitycovariance-{}.npy'.format(outputstem)
-namelistoutput='snnames-{}.list'.format(outputstem)
+namelistoutput='snnames-{}.npy'.format(outputstem)
 distanceprefactor=D*f * (1+z)/ D_L * 5 /np.log(10)
 #Convert dDdtau from dimensionless to km/s
 velocityprefactor=dDdtau*constants.c/1e3
