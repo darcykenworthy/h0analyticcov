@@ -90,7 +90,7 @@ parser.add_argument('--outputstem',default=False,
                     help='Add this to the output file name')
 parser.add_argument('--sigrsd',type=float,default=14,
                     help='Redshift space distortion scale in Mpc/h(default is 14, 0 deactivates redshift space distortions)')
-parser.add_argument('--kprecision',type=float,nargs=3,default=[2e-4,2000,10],
+parser.add_argument('--kprecision',type=float,nargs=3,default=[2e-4,3000,1],
                     help='Minimum value of k for integration, number of points, and maximum value of k')
 parser.add_argument('--nonlinear_scale',type=float,default=-1,
                     help='Splits the integral over k in two at this value in h/Mpc and saves them to output separately. Set to -1 to cancel')
@@ -202,6 +202,7 @@ k,dlog10k,pk_nl_dlog10k=calc_pk_nl_dlog10k(*kprecision,sig_rsd,0)
 #Calculate only the elements that aren't nonlinear, and only calculate the upper triangular part, then copy to lower triangular
 calculatelements=np.ones(separation.shape,dtype=bool)
 calculatelements[np.tril_indices(z.size,-1)]=False
+calculatelements[separation==0]=False
 print('Calculating velocity covariance matrix')
 if separatenonlinear:
 	integralterm=np.ones((2,z.size,z.size))*dummyval
@@ -223,8 +224,8 @@ for i in trange(numchunks):
 	#Convert to rad from deg
 	cosa=np.cos(angsep[chunkindices]*np.pi/180)[np.newaxis,:]*np.ones((k.size,1))
 	#Exclude all the ones that are the same position as those reduce to 1/3
-	nosep=w==0
-	u,v,w,cosa=u[~nosep],v[~nosep],w[~nosep],cosa[~nosep]
+# 	nosep=w==0
+# 	u,v,w,cosa=u[~nosep],v[~nosep],w[~nosep],cosa[~nosep]
 	#Make sure I'm not wasting function evaluations
 	wdwdu=u-v*cosa
 	wdwdv=v-u*cosa
@@ -234,9 +235,7 @@ for i in trange(numchunks):
 	wcoswlesssinw=w*cosw-sinw
 	wsq=w**2
 	#Calculate the series over Bessell functions (this relation corresponds to d^2 sinc(w) / du dv) (as the separation, w^2=u^2+v^2-2 uv cos(alpha))
-	series=np.empty(nosep.shape)
-	series[nosep]=1./3
-	series[~nosep]= (-wdwdutimeswdwdv * (wsq*sinw+3*wcoswlesssinw) - wcoswlesssinw*(wsq*cosa ))/w**5
+	series= (-wdwdutimeswdwdv * (wsq*sinw+3*wcoswlesssinw) - wcoswlesssinw*(wsq*cosa ))/w**5
 	#integrate over the power spectrum dlogk
 	if separatenonlinear:
 		integrand=series*pk_nl_dlog10k[:,np.newaxis]
@@ -249,7 +248,8 @@ for i in trange(numchunks):
 		elements=(series*pk_nl_dlog10k[:,np.newaxis]).sum(axis=0)*dlog10k/(2*np.pi**2)
 		integralterm[chunkindices]=elements
 		integralterm.T[chunkindices]=elements
-		
+integralterm[separation==0]=1./3*(pk_nl_dlog10k).sum(axis=0)*dlog10k/(2*np.pi**2)	
+
 velcovoutput='velocitycovariance-{}.npy'.format(outputstem)
 namelistoutput='snnames-{}.npy'.format(outputstem)
 distanceprefactor=D*f * (1+z)/ D_L * 5 /np.log(10)

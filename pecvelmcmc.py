@@ -32,6 +32,8 @@ parser.add_argument('redshiftfile',type=str,
                     help='File with supernova redshifts in labeled columns')
 parser.add_argument('zkey',type=str,
                     help='Name (or column) of the redshift column to be used for this run')
+parser.add_argument('--redshiftcut',type=float,nargs=2,default=[0.01,.08],
+                    help='Minimum and maximum redshift values')
 parser.add_argument('--niter',type=int,default=3000,
                     help='Number of iterations per chain')
 parser.add_argument('--outputdir',type=str,default='.',
@@ -56,15 +58,18 @@ parser.add_argument('--posteriorpredictive', default=None,type=str,
                     help='Path to pickle file with simulated samples and values. If provided, these override muresiduals from fitres and redshift file')
 parser.add_argument('--sampleprior', action='store_true', 
                     help='Sample directly from prior distribution without constraints from data')
+parser.add_argument('--njobs', type=int,default=0, 
+                    help='Number of jobs to launch (defaults to the number of cpu\'s available)')
 parser.add_argument('--clobber', action='store_true', 
                     help='Overwrite existing final output file')
 args = parser.parse_args()
+
 fitres=args.fitres
 redshiftfile=args.redshiftfile
 redshiftcolumn=args.zkey
 niter,nchains=args.niter,args.nchains
 outputdir=args.outputdir
-redshiftcut= (.01,.08)
+redshiftcut= args.redshiftcut
 rescalebeta=( args.varyscaling )
 isposteriorpredictivecheck=( not args.posteriorpredictive is None)
 pickleoutput='{}_{}_{}.pickle'.format( path.splitext(path.split(fitres)[-1])[0],path.splitext(path.split(redshiftfile)[-1])[0],redshiftcolumn)
@@ -130,6 +135,11 @@ try:
 except KeyError:
     ncpus = multiprocessing.cpu_count()
 print(ncpus)
+if args.njobs==0:
+	njobs=ncpus
+else:
+	njobs=args.njobs
+	
 if redshiftfile.lower().endswith('.fitres'):
 	zvector,evalcolumn=readFitres(redshiftfile)[redshiftcolumn],redshiftcolumn
 	sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector))
@@ -204,8 +214,9 @@ sndata=sndataNoDups.copy()
 
 zcmb=sndata['zCMB']
 snra=sndata['RA']*u.degree
-sndec=sndata['DEC']*u.degree
-sncoords=SkyCoord(ra=sndata['RA'],dec=sndata['DEC'],unit=u.deg)
+deckey='DEC' if 'DEC' in sndata.dtype.names else 'DECL'
+sndec=sndata[deckey]*u.degree
+sncoords=SkyCoord(ra=sndata['RA'],dec=sndata[deckey],unit=u.deg)
 
 chi=cosmo.comoving_distance(zcmb).to(u.Mpc).value
 snpos=np.zeros((sndata.size,3))
@@ -241,19 +252,31 @@ velocityprefactor=np.outer(dmudvpec,dmudvpec)
 pecvelcov=np.load('velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))
 
 nonlinear=separation==0
+def checkposdef(matrix):
+	while linalg.eigvalsh(matrix).min()<0:
+		print(f'Alert! Matrix is not positive definite, adding diagonal term {-1.5*linalg.eigvalsh(matrix).min()}')
+		matrix=matrix+ np.diag(np.ones(matrix.shape[0])*linalg.eigvalsh(matrix).min()*-1.5)
+	return matrix
+
+
+
 nonlinearmu=velocityprefactor*(nonlinear)
-pecvelcovmu=velocityprefactor*(pecvelcov+np.diag(1e-10*np.ones(z.size)))
+pecvelcovmu=velocityprefactor*(pecvelcov)
+
+pecvelcovmu=checkposdef(pecvelcovmu)
+nonlinearmu=checkposdef(nonlinearmu)
 
 assert(linalg.eigvalsh(pecvelcovmu).min()>=0)
 assert(linalg.eigvalsh(nonlinearmu).min()>=0)
 
+define_additional_data=''
 define_additional_constants=''
 model_name=''
 # In[13]:
 
 
 if args.fixuncorrectedcovariance:
-	modelname+='uncorrectedfixed_'
+	model_name+='uncorrectedfixed_'
 	define_additional_data="""
 	matrix[N,N] pecvelcovmuonecorrected;
 	matrix[N,N] pecvelcovmuuncorrected;
@@ -369,6 +392,7 @@ else:
 with open(codefile,'w') as file: file.write(model_code)
 
 cut= (z>redshiftcut[0])&(z<redshiftcut[1])
+print(f'{cut.sum()} SNe in redshift range {redshiftcut}')
 if args.groupsonly:
 	cut=cut&sndata['isgroup']
 standat = {'N': cut.sum(),
@@ -383,9 +407,10 @@ standat = {'N': cut.sum(),
               }
 if args.fixuncorrectedcovariance:
 	cutpecvelcovmu=pecvelcovmu[cut,:][:,cut]
-	uncorrected=mucorrections==0
-	bothcorrected=( (~uncorrected[:,np.newaxis]) & (~uncorrected[:,np.newaxis])  )
-	neithercorrected=( (uncorrected[:,np.newaxis]) & (uncorrected[:,np.newaxis])  )
+	uncorrected=z[cut]>.1
+	
+	bothcorrected=( (~uncorrected[:,np.newaxis]) & (~uncorrected[np.newaxis,:])  )
+	neithercorrected=( (uncorrected[:,np.newaxis]) & (uncorrected[np.newaxis,:])  )
 	onecorrected=~ (neithercorrected | bothcorrected)
 	print(f'{uncorrected.sum()} SNe with no correction and {uncorrected.size-uncorrected.sum()} SNe with correction')
 	standat['pecvelcovmu']=cutpecvelcovmu * bothcorrected
@@ -413,7 +438,7 @@ print(opfit)
 if args.posteriorpredictive:
         print('Posterior produced with parameters :',{x:simmedparams[x] for x in opfit})
 if not args.optimizing:
-	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=ncpus,warmup = min(niter//2,1000),init=initfun)
+	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=njobs,warmup = min(niter//2,1000),init=initfun)
 	print(fit.stansummary())
 	with open(pickleoutput,'wb') as picklefile: pickle.dump([model,fit,opfit],picklefile,-1)
 
