@@ -123,10 +123,11 @@ bounds=[bounds[x] for x in vars]
 logp=lambda x: fit.log_prob(fit.unconstrain_pars({var:val for var,val in zip(vars,x)}),adjust_transform=False)
 
 # In[4]:
-result=Marginal_llk(fit,logp,vars,bounds)
+#result=Marginal_llk(fit,logp,vars,bounds)
+result={}
 result['pars']=fit.extract()
 mtrace= np.array([fit.extract(var)[var] for var in vars]).T
-result['pars']['lp__']=np.asarray([logp(point) for point in tqdm.tqdm(mtrace)])
+#result['pars']['lp__']=np.asarray([logp(point) for point in tqdm.tqdm(mtrace)])
 result['maxposterior']=opfit
 result['maxposterior']['lp__']=fit.log_prob(fit.unconstrain_pars(opfit),adjust_transform=False)
 with open(path.join(outdirectory,'marginal_'+base),'wb') as file: pickle.dump(result,file)

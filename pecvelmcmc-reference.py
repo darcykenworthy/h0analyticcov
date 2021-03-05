@@ -28,18 +28,16 @@ cosmo=Planck15
 parser = argparse.ArgumentParser(description='Calculate velocity covariance between supernovae from fitres file')
 parser.add_argument('fitres',type=str, 
                     help='File with supernova distances')
-parser.add_argument('redshiftfile',type=str,
+parser.add_argument('redshiftfile',type=str, 
                     help='File with supernova redshifts in labeled columns')
 parser.add_argument('zkey',type=str,
                     help='Name (or column) of the redshift column to be used for this run')
-parser.add_argument('--intrins',type=float,default=None,
-                    help='Fix intrinsic scatter to a given value')
-parser.add_argument('--redshiftcut',type=float,nargs=2,default=[0.01,.08],
-                    help='Minimum and maximum redshift values')
 parser.add_argument('--niter',type=int,default=3000,
                     help='Number of iterations per chain')
 parser.add_argument('--outputdir',type=str,default='.',
                     help='Directory to write output pickle file')
+parser.add_argument('--refcolumn',type=str,default=None,
+                    help='If true, scales peculiar velocity uncertainty by a factor for SNe whose redshifts are corrected relative to this column')
 parser.add_argument('--nchains',type=int,default=4,
                     help='Number of chains to run')
 parser.add_argument('--extra_dispersion',action='store_true',
@@ -48,54 +46,30 @@ parser.add_argument('--optimizing',action='store_true',
                     help='Useful for debugging: don\'t run mcmc, instead just return mode of posterior')
 parser.add_argument('--flatprior',action='store_true',
                     help='Use flat priors on all parameters (default is Jeffreys prior)')
-parser.add_argument('--fixuncorrectedcovariance', action='store_true', 
-                    help='Fix the scale of the peculiar velocity covariance to 1 for all SNe without a peculiar velocity correction')
 parser.add_argument('--fixcovariance', action='store_true',
                     help='Fix the scale of the peculiar velocity covariance matrix to 1')
-parser.add_argument('--varyscaling', action='store_true', 
-                    help='Vary the overall scale of 2m++ corrections')
-parser.add_argument('--groupsonly', action='store_true', 
-                    help='If true, only use supernovae whose redshifts are different from those in the 2m++ column')
-parser.add_argument('--posteriorpredictive', default=None,type=str,
-                    help='Path to pickle file with simulated samples and values. If provided, these override muresiduals from fitres and redshift file')
-parser.add_argument('--sampleprior', action='store_true', 
-                    help='Sample directly from prior distribution without constraints from data')
-parser.add_argument('--njobs', type=int,default=0, 
-                    help='Number of jobs to launch (defaults to the number of cpu\'s available)')
-parser.add_argument('--clobber', action='store_true', 
-                    help='Overwrite existing final output file')
+parser.add_argument('--varyscaling', type=str,default=None,
+                    help='If provided with second name/column #, then treats second vector as corrections to first, with fitted rescaling of beta')
 args = parser.parse_args()
-
 fitres=args.fitres
 redshiftfile=args.redshiftfile
 redshiftcolumn=args.zkey
 niter,nchains=args.niter,args.nchains
 outputdir=args.outputdir
-redshiftcut= args.redshiftcut
-rescalebeta=( args.varyscaling )
-isposteriorpredictivecheck=( not args.posteriorpredictive is None)
+redshiftcut= (.01,.08)
+rescalebeta=not( args.varyscaling is None)
+relativetoreference= not(args.refcolumn is None)
 pickleoutput='{}_{}_{}.pickle'.format( path.splitext(path.split(fitres)[-1])[0],path.splitext(path.split(redshiftfile)[-1])[0],redshiftcolumn)
-fixintrins=not (args.intrins is None)
-intrins=args.intrins
-
 if rescalebeta:
-	pickleoutput="rescalebeta_"+pickleoutput
+	pickleoutput="extra_dispersion_"+pickleoutput
 if args.extra_dispersion:
 	pickleoutput="extra_dispersion_"+pickleoutput
 if args.flatprior:
 	pickleoutput='flat_'+pickleoutput
-if args.sampleprior:
-	pickleoutput='prior_'+pickleoutput
-elif args.posteriorpredictive:
-	pickleoutput='posteriorpredictive_'+pickleoutput	
+
 os.makedirs(outputdir,exist_ok=True)
 pickleoutput=path.join(outputdir,pickleoutput)
-if path.exists(pickleoutput) and not args.clobber and not args.optimizing:
-	raise ValueError('Clobber is false and output file already exists')
 # In[3]:
-
-    
-
 
 sdss=['16314','16392','16333','14318','17186','17784','7876']
 trunames=['2006oa','2006ob','2006on','2006py','2007hx','2007jg','2005ir']
@@ -136,52 +110,43 @@ sndataFull['MUERR']=sndataFull['MUERR_RAW']
 
 
 try:
-    ncpus = sum([int(x) for x in os.environ["SLURM_JOB_CPUS_PER_NODE"].split(',')])
+    ncpus = int(os.environ["SLURM_JOB_CPUS_PER_NODE"])
 except KeyError:
     ncpus = multiprocessing.cpu_count()
-print(ncpus)
-if args.njobs==0:
-	njobs=ncpus
+redshifttable=np.genfromtxt(redshiftfile,names=True)
+def loadzvec(index):
+	try: 
+		retvals=redshifttable[index],index
+	except:
+		name=redshifttable.dtype.names[int(index)]
+		retvals=redshifttable[name],name
+	return retvals
+zvector,evalcolumn=loadzvec(redshiftcolumn)
+if  not rescalebeta:
+	corrections,corrcolumn=zvector.copy(),evalcolumn
 else:
-	njobs=args.njobs
-	
-if redshiftfile.lower().endswith('.fitres'):
-	zvector,evalcolumn=readFitres(redshiftfile)[redshiftcolumn],redshiftcolumn
-	sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector))
-	sndataFull=np.array(recfunctions.append_fields(sndataFull,'isgroup',np.tile(False,zvector.size)))
+	corrections,corrcolumn=loadzvec(args.varyscaling)
+zvectornames=readFitres('lowz_comb_csp_hst.fitres')['CID']
+zvectorindices=[]
+i=0
+j=0
+while i<sndataFull.size and j<zvectornames.size:
+    if sndataFull['CID'][i]==zvectornames[j]:
+        zvectorindices+=[j]
+        i+=1
+        j+=1
+    else:
+        j+=1
+print(f'Loaded redshift vector \"{evalcolumn}\" and corrections \"{corrcolumn}\"')
+zvectorindices=np.array(zvectorindices)
+sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector[zvectorindices]))
+sndataFull=np.array(recfunctions.append_fields(sndataFull,'zcorrected',corrections[zvectorindices]))
+if relativetoreference:
+	referencez,refcol=loadzvec(args.refcolumn)
+	ischanged=~(referencez==zvector)
 else:
-	redshifttable=np.genfromtxt(redshiftfile,names=True)
-	def loadzvec(index):
-		try: 
-			retvals=redshifttable[index],index
-		except:
-			name=redshifttable.dtype.names[int(index)]
-			retvals=redshifttable[name],name
-		return retvals
-	if args.posteriorpredictive:
-		zvector,evalcolumn=np.zeros(redshifttable.size),'NULL'
-	else :
-		zvector,evalcolumn=loadzvec(redshiftcolumn)
-
-	zvectornames=readFitres('lowz_comb_csp_hst.fitres')['CID']
-	zvectorindices=[]
-	i=0
-	j=0
-	while i<sndataFull.size and j<zvectornames.size:
-		if sndataFull['CID'][i]==zvectornames[j]:
-			zvectorindices+=[j]
-			i+=1
-			j+=1
-		else:
-			j+=1
-	print(f'Loaded redshift vector \"{evalcolumn}\"')
-	zvectorindices=np.array(zvectorindices)
-	if evalcolumn=='lowz_comb_csp_hst':
-		isgroup=~(zvector==redshifttable['tully_avg'])
-	else:
-		isgroup=~(zvector == redshifttable['lowz_comb_csp_hst'])
-	sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector[zvectorindices]))
-	sndataFull=np.array(recfunctions.append_fields(sndataFull,'isgroup',isgroup[zvectorindices]))
+	ischanged= zvector==zvector
+sndataFull=np.array(recfunctions.append_fields(sndataFull,'diffreference',ischanged[zvectorindices]))
 
 # In[5]:
 
@@ -219,9 +184,8 @@ sndata=sndataNoDups.copy()
 
 zcmb=sndata['zCMB']
 snra=sndata['RA']*u.degree
-deckey='DEC' if 'DEC' in sndata.dtype.names else 'DECL'
-sndec=sndata[deckey]*u.degree
-sncoords=SkyCoord(ra=sndata['RA'],dec=sndata[deckey],unit=u.deg)
+sndec=sndata['DECL']*u.degree
+sncoords=SkyCoord(ra=sndata['RA'],dec=sndata['DECL'],unit=u.deg)
 
 chi=cosmo.comoving_distance(zcmb).to(u.Mpc).value
 snpos=np.zeros((sndata.size,3))
@@ -238,14 +202,11 @@ for i in range(sndata.size):
 
 
 # In[8]:
-if isposteriorpredictivecheck:
-        with open(args.posteriorpredictive,'rb') as file: musamples,parsamples=pickle.load(file)
-        simmedmuresiduals=musamples[:,int(args.zkey)]
-        simmedparams=parsamples[int(args.zkey)]
-else:
-        muresiduals=cosmo.distmod(sndata['zeval']).value - sndata['MU']
 
-mucorrections=(cosmo.distmod(sndata['zCMB']) - cosmo.distmod(sndata['zHD']) ).value
+
+muresiduals=cosmo.distmod(sndata['zeval']).value - sndata['MU']
+mucorrections=(cosmo.distmod(sndata['zeval']) - cosmo.distmod(sndata['zcorrected']) ).value
+
 # In[10]:
 
 
@@ -257,46 +218,18 @@ velocityprefactor=np.outer(dmudvpec,dmudvpec)
 pecvelcov=np.load('velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))
 
 nonlinear=separation==0
-def checkposdef(matrix):
-	diag=0
-	while linalg.eigvalsh(matrix).min()<0:
-		print(f'Alert! Matrix is not positive definite, adding diagonal term {-1.5*linalg.eigvalsh(matrix).min()}')
-		add=linalg.eigvalsh(matrix).min()*-1.5
-		matrix=matrix+ np.diag(np.ones(matrix.shape[0])*add)
-		diag+=add
-	return matrix,diag
-
-
-
 nonlinearmu=velocityprefactor*(nonlinear)
-pecvelcovmu=velocityprefactor*(pecvelcov)
-
-pecvelcovmu,adddiag=checkposdef(pecvelcovmu)
-nonlinearmu,adddiag2=checkposdef(nonlinearmu)
+pecvelcovmu=velocityprefactor*(pecvelcov+np.diag(1e-10*np.ones(z.size)))
 
 assert(linalg.eigvalsh(pecvelcovmu).min()>=0)
 assert(linalg.eigvalsh(nonlinearmu).min()>=0)
 
-define_additional_data=''
 define_additional_constants=''
 model_name=''
 # In[13]:
-
-
-if args.fixuncorrectedcovariance:
-	model_name+='uncorrectedfixed_'
-	define_additional_data="""
-	matrix[N,N] pecvelcovmuonecorrected;
-	matrix[N,N] pecvelcovmuuncorrected;
-"""
-	define_sigma=""" matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+systematics+square(velscaling)*pecvelcovmu + velscaling *pecvelcovmuonecorrected + pecvelcovmuuncorrected"""
-
-else:
-	define_sigma=""" matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+systematics+square(velscaling)*pecvelcovmu"""
-
-
-
+sigparams=[('intrins','diag_matrix(biasscale)')] 
 if args.extra_dispersion:
+	sigparams+=[('veldispersion_additional','nonlinearmu')]
 	model_name+='extra_veldispersion_'
 	define_additional_params="""
 	    real<lower=10,upper=500> veldispersion_additional;
@@ -304,35 +237,41 @@ if args.extra_dispersion:
 	define_veldispersion="""
 	    real veldispersion=sqrt(square(veldispersion_additional)+square(243*velscaling));
 """
-	define_sigma=define_sigma+'+nonlinearmu*square(veldispersion_additional)'
+	define_sigma="""
+	    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+nonlinearmu*square(veldispersion_additional)+systematics+square(velscaling)*pecvelcovmu;
+"""
+
 else:
 	define_additional_params="""
 """
 	define_veldispersion="""
 	    real veldispersion=243*velscaling;
 """
-if fixintrins:
-	model_name+='fixintrins_'
-	define_additional_constants+="""
-    		real<lower=.01,upper=.3> intrins;
+	define_sigma="""
+	    matrix[N,N] sigma = diag_matrix(biasscale*square(intrins)+square(muerr))+systematics+square(velscaling)*pecvelcovmu;
 """
-else:
-	define_additional_params+="""
-    		real<lower=.01,upper=.3> intrins;
-"""
+
 if args.fixcovariance:
 	model_name+='fixedpeccov_'
 	define_additional_constants+="""
 	    real<lower=.01,upper=10> velscaling=1;
 """
 else:
+	sigparams+=[('velscaling','pecvelcovmu')]
 	define_additional_params+="""
 	    real<lower=.01,upper=10> velscaling;
 """
+if relativetoreference:
+	define_additional_params+="""
+	    real<lower=.01,upper=2> rescale_refdiff;
+"""
+	define_sigma+="""
+	    sigma= sigma.*( rescale_refdiff+ 
+"""
+
 if not args.flatprior:
 	model_name+='jeffreys_'
-	sigparams,design= zip(*([('intrins','intrins*diag_matrix(biasscale)')] if not fixintrins else []) + ([('veldispersion_additional','veldispersion_additional*nonlinearmu')] if args.extra_dispersion else []) + ([] if args.fixcovariance else [
-	('velscaling', '2 *(velscaling)*pecvelcovmu + pecvelcovmuonecorrected' if args.fixuncorrectedcovariance else 'velscaling*pecvelcovmu')]))
+	sigparams,design= zip(*sigparams ))
 	nsig= len(sigparams) 
 	
 	prior_block=f"""
@@ -341,7 +280,7 @@ if not args.flatprior:
 	    matrix[{nsig},{nsig}] fishermatrix;
 	    for (i in 1:{nsig}){{
 	        for (j in 1:{nsig}){{
-		    fishermatrix[i,j]=  sum(invsigdesigns[i].*invsigdesigns[j]);
+		    fishermatrix[i,j]= sigparams[i]*sigparams[j] *  sum(invsigdesigns[i].*invsigdesigns[j]);
 	        }}
 	    }}
 	    target+=(.5*log_determinant(fishermatrix));    
@@ -361,23 +300,18 @@ else:
 	calculate_residuals="""
 	    muresiduals ~ multi_normal(zeros+offset, sigma);
 """ 
-
-if args.sampleprior:
-	model_name='prior_'+model_name
-	calculate_residuals="" 
-
 model_name+='model'
 model_code=f"""
 data {{
     int<lower=0> N; // number of SNe
     vector[N] muresiduals;
     vector[N] mucorrections;
+    matrix[N,N] diffreference;
     vector<lower=0>[N] muerr; // s.e. of effect estimates
     vector[N] biasscale;
-    matrix[N,N] pecvelcovmu;
-    matrix[N,N] nonlinearmu;
+    cov_matrix[N] pecvelcovmu;
+    cov_matrix[N] nonlinearmu;
     matrix[N,N] systematics;
-    {define_additional_data}
 }}
 transformed data{{
     vector[N] zeros= rep_vector(0,N);
@@ -386,14 +320,15 @@ transformed data{{
 }}
 
 parameters {{
-    real<lower=-.3,upper=.3> offset;
+    real<multiplier=0.01> offset;
+    real<lower=.01,upper=.3> intrins;
     {define_additional_params}
 }}
 transformed parameters {{
     {define_veldispersion}
 }}
 model {{
-    {define_sigma};
+    {define_sigma}
     {prior_block}
     {calculate_residuals}
 }}
@@ -407,32 +342,17 @@ else:
 with open(codefile,'w') as file: file.write(model_code)
 
 cut= (z>redshiftcut[0])&(z<redshiftcut[1])
-print(f'{cut.sum()} SNe in redshift range {redshiftcut}')
-if args.groupsonly:
-	cut=cut&sndata['isgroup']
 standat = {'N': cut.sum(),
                'zeros':np.zeros(cut.sum()),
-               'muresiduals': simmedmuresiduals if args.posteriorpredictive else muresiduals[cut],
+               'muresiduals': muresiduals[cut],
                'mucorrections':mucorrections[cut],
+               'diffreference':diffreference[cut],
 	       'muerr': sndata['MUERR_RAW'][cut],
                'biasscale':sndata['biasScale_muCOV'][cut],
                'nonlinearmu':nonlinearmu[cut,:][:,cut],
                'systematics': np.zeros((cut.sum(),cut.sum())),
                'pecvelcovmu':pecvelcovmu[cut,:][:,cut],
               }
-if args.fixuncorrectedcovariance:
-	cutpecvelcovmu=pecvelcovmu[cut,:][:,cut]
-	uncorrected=z[cut]>.1
-	
-	bothcorrected=( (~uncorrected[:,np.newaxis]) & (~uncorrected[np.newaxis,:])  )
-	neithercorrected=( (uncorrected[:,np.newaxis]) & (uncorrected[np.newaxis,:])  )
-	onecorrected=~ (neithercorrected | bothcorrected)
-	print(f'{uncorrected.sum()} SNe with no correction and {uncorrected.size-uncorrected.sum()} SNe with correction')
-	standat['pecvelcovmu']=cutpecvelcovmu * bothcorrected
-	standat['pecvelcovmuonecorrected']=cutpecvelcovmu*onecorrected
-	standat['pecvelcovmuuncorrected']= cutpecvelcovmu *neithercorrected
-if fixintrins:
-	standat['intrins']=intrins
 
 modelpickleoutput=path.join(outputdir,f'{model_name}.pickle')
 with open(path.join(outputdir,'data_'+path.basename(pickleoutput)),'wb') as file: pickle.dump(standat,file,-1) 
@@ -450,16 +370,15 @@ initfun=lambda :{
     'veldispersion_additional': np.exp(np.random.normal(np.log(200),.1)),
     'intrins': np.exp(np.random.normal(np.log(.12),.1))
 }
-opfit = model.optimizing(data=standat,init=initfun)
-print(opfit)
-if args.posteriorpredictive:
-        print('Posterior produced with parameters :',{x:simmedparams[x] for x in opfit})
-if not args.optimizing:
-	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=njobs,warmup = min(niter//2,1000),init=initfun)
+if args.optimizing:
+	fit = model.optimizing(data=standat,init=initfun)
+	print(fit)
+else:
+	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=ncpus,warmup = min(niter//2,1000),init=initfun)
 	print(fit.stansummary())
-	with open(pickleoutput,'wb') as picklefile: pickle.dump([model,fit,opfit],picklefile,-1)
 
 # In[17]:
 
 
+with open(pickleoutput,'wb') as picklefile: pickle.dump([model,fit],picklefile,-1)
 

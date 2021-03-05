@@ -90,7 +90,7 @@ parser.add_argument('--outputstem',default=False,
                     help='Add this to the output file name')
 parser.add_argument('--sigrsd',type=float,default=14,
                     help='Redshift space distortion scale in Mpc/h(default is 14, 0 deactivates redshift space distortions)')
-parser.add_argument('--kprecision',type=float,nargs=3,default=[2e-4,3000,1],
+parser.add_argument('--kprecision',type=float,nargs=3,default=[2e-4,3000,.2],
                     help='Minimum value of k for integration, number of points, and maximum value of k')
 parser.add_argument('--nonlinear_scale',type=float,default=-1,
                     help='Splits the integral over k in two at this value in h/Mpc and saves them to output separately. Set to -1 to cancel')
