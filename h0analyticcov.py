@@ -39,7 +39,7 @@ def calc_pk_nl_dlog10k(kmin,kspacing,kmax,sig_rsd,background=0):
 		redshiftdistortion=1
 	else:
 		redshiftdistortion=np.sinc(k*sig_rsd/np.pi)**2
-		#redshiftdistortion[k>np.pi/sig_rsd]=0
+		redshiftdistortion[k>np.pi/sig_rsd]=0
 	pk_nl*=redshiftdistortion
 	pk_nl+=background
 	pk_nl_dlog10k=(pk_nl)*k*np.log(10)
