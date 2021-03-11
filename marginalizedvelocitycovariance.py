@@ -27,26 +27,17 @@ cosmo=Planck15
 
 
 parser = argparse.ArgumentParser(description='Calculate predicted peculiar velocity correction and covariance between supernovae from results of MCMC ')
-parser.add_argument('marginalpickle',type=str, 
+parser.add_argument('marginalpickle',type=str, nargs='+',
                     help='File with MCMC chain')
 parser.add_argument('fitres',type=str, 
                     help='File with SNe')
 parser.add_argument('--destoutput',type=str,default=None, 
                     help='Path to write pickle with bias and covariance')
 args = parser.parse_args()
-picklefile=args.marginalpickle
+picklefile=args.marginalpickle[0]
 fitres=args.fitres
 output=args.destoutput if not  args.destoutput is None else path.join(path.dirname(picklefile), 'posteriorbiascov_'+path.basename(picklefile) )
 # In[3]:
-with open(picklefile,'rb') as file:  model,fit,opfit=pickle.load(file)
-with open(path.join(path.dirname(picklefile), 'data_'+path.basename(picklefile) ),'rb') as file: data=pickle.load(file)
-
-velscaling=fit.extract('velscaling')['velscaling']
-veldispersion=fit.extract('veldispersion_additional')['veldispersion_additional']
-if 'betarescale' in fit.extract().keys():
-	betarescale=fit.extract(['betarescale'])['betarescale']
-else:
-	betarescale=np.zeros(velscaling.size)
 
 sdss=['16314','16392','16333','14318','17186','17784','7876']
 trunames=['2006oa','2006ob','2006on','2006py','2007hx','2007jg','2005ir']
@@ -80,7 +71,6 @@ def weightedMean(vals,covs,cut=None):
     return mean,np.sqrt(var),chiSquared
 
 sndataFull=readFitres(fitres)
-sndataFull['MUERR']=sndataFull['MUERR_RAW']
 
 
 
@@ -106,9 +96,6 @@ for name in np.unique(sndataNoDups['CID']):
         inds=inds[cut]
 
     finalInds+=[inds[0]]
-    if len(inds)>1:
-        for x in ['MU','c','x1']:
-            sndataNoDups[x][inds[0]],sndataNoDups[x+'ERR'][inds[0]],_=weightedMean(sndataNoDups[x],sndataNoDups[x+'ERR']**2,sndataNoDups['CID']==name)
 
 sndataNoDups=sndataNoDups[finalInds].copy()
 sndata=sndataNoDups.copy()
@@ -129,17 +116,18 @@ snpos[:,1]=np.cos(sndec)*np.cos(snra)
 snpos[:,2]=np.sin(sndec)
 snpos*=chi[:,np.newaxis]
 
+def checkposdef(matrix):
+	vals,vecs=linalg.eigh(matrix)
+	if (vals>=0).all(): return matrix
+	covclipped=np.dot(vecs,np.dot(np.diag(np.clip(vals,vals.max()*1e-10,None)),vecs.T))
+	return covclipped 
 separation=np.sqrt(((snpos[:,np.newaxis,:]-snpos[np.newaxis,:,:])**2).sum(axis=2))
 nonlinear=separation==0
 dmudvpec=5/np.log(10)*((1+z)**2/(cosmo.efunc(z)*cosmo.H0*cosmo.luminosity_distance(z))).to(u.s/u.km).value
 velocityprefactor=np.outer(dmudvpec,dmudvpec)
+pecvelcov=checkposdef(pecvelcov)
 pecvelcovmu=velocityprefactor*(pecvelcov)
 nonlinearmu=velocityprefactor*(nonlinear)
-def checkposdef(matrix):
-	while linalg.eigvalsh(matrix).min()<0:
-		print(f'Alert! Matrix is not positive definite, adding diagonal term {-1.5*linalg.eigvalsh(matrix).min()}')
-		matrix=matrix+ np.diag(np.ones(matrix.shape[0])*linalg.eigvalsh(matrix).min()*-1.5)
-	return matrix
 pecvelcovmu=checkposdef(pecvelcovmu)
 nonlinearmu=checkposdef(nonlinearmu)
 
@@ -153,20 +141,46 @@ pecvelcovmubothcorrected=pecvelcovmu * bothcorrected
 pecvelcovmuonecorrected=pecvelcovmu*onecorrected
 pecvelcovmuuncorrected= pecvelcovmu *neithercorrected
 
+with open(picklefile,'rb') as file:  model,fit,opfit=pickle.load(file)
+with open(path.join(path.dirname(picklefile), 'data_'+path.basename(picklefile) ),'rb') as file: data=pickle.load(file)
+
+velscaling=fit.extract('velscaling')['velscaling']
+veldispersion=fit.extract('veldispersion_additional')['veldispersion_additional']
+if 'betarescale' in fit.extract().keys():
+	betarescale=fit.extract(['betarescale'])['betarescale']
+else:
+	betarescale=np.zeros(velscaling.size)
 
 marginalizedcorrection=-np.mean(betarescale)*correction
-marginalizedcov=np.var(betarescale)*np.outer(correction,correction) + np.mean(velscaling**2)*pecvelcovmubothcorrected+np.mean(velscaling)*pecvelcovmuonecorrected+pecvelcovmuuncorrected+np.mean(veldispersion**2)*nonlinearmu
+scalecov=np.var(betarescale)*np.outer(correction,correction)
+lowzmargpecvelcovmu=np.mean(velscaling**2)*pecvelcovmubothcorrected 
+margpecvelcovmu=np.mean(velscaling**2)*pecvelcovmubothcorrected+np.mean(velscaling)*pecvelcovmuonecorrected+pecvelcovmuuncorrected
+margnonlinearmu=np.mean(veldispersion**2)*nonlinearmu
+marginalizedcov=scalecov + margpecvelcovmu+margnonlinearmu
 print(f'{np.std(betarescale)}, {np.sqrt(np.mean(velscaling**2))}, {np.sqrt(np.mean(veldispersion**2))}')
+
+if len(args.marginalpickle)>1:
+	marginalizedcovsecondary=[]
+	for picklefile in args.marginalpickle[1:]:
+		
+		with open(picklefile,'rb') as file:  model,fit,opfit=pickle.load(file)
+		velscaling=fit.extract('velscaling')['velscaling']
+		veldispersion=fit.extract('veldispersion_additional')['veldispersion_additional']
+		if 'betarescale' in fit.extract().keys():
+			betarescale=fit.extract(['betarescale'])['betarescale']
+		else:
+			betarescale=np.zeros(velscaling.size)
+		marginalizedcovsecondary+=[np.var(betarescale)*np.outer(correction,correction) +np.mean(velscaling**2)*pecvelcovmubothcorrected+np.mean(velscaling)*pecvelcovmuonecorrected+pecvelcovmuuncorrected+np.mean(veldispersion**2)*nonlinearmu]
 cid=sndata['CID']
 zcmb=sndata['zCMB']
 with open(output,'wb') as file: pickle.dump((marginalizedcorrection,marginalizedcov),file)
 csvoutput=output.replace('pickle','csv')
 with open(csvoutput,'w') as file:
     writer=csv.writer(file,delimiter=',')
-    writer.writerow(['CID_1','zCMB_1','MU_VEL_CORRECTION_1','CID_2','zCMB_2','MU_VEL_CORRECTION_1','MU_VEL_COVARIANCE'])
+    writer.writerow(['CID_1','zCMB_1','MU_VEL_CORRECTION_1','CID_2','zCMB_2','MU_VEL_CORRECTION_1','MU_VEL_COVARIANCE','SCALE_COVARIANCE','NONLINEAR_COVARIANCE','LINEAR_COVARIANCE','LOWZ_LINEAR_COVARIANCE','FIDUCIAL_LINEAR_COVARIANCE']+[f'COVARIANCE_VARIANT_{k}' for k  in range(len(marginalizedcovsecondary))])
     for i in range(sndata.size):
         for j in range(sndata.size):
-           writer.writerow([cid[i],zcmb[i],marginalizedcorrection[i],cid[j],zcmb[j],marginalizedcorrection[j],marginalizedcov[i,j]])
+           writer.writerow([cid[i],zcmb[i],marginalizedcorrection[i],cid[j],zcmb[j],marginalizedcorrection[j],marginalizedcov[i,j],scalecov[i,j],margnonlinearmu[i,j],margpecvelcovmu[i,j],lowzmargpecvelcovmu[i,j],pecvelcovmu[i,j]]+[marginalizedcovsecondary[k][i,j] for k  in range(len(marginalizedcovsecondary))])
 print(f'Output written to {output} and {csvoutput}')
 
 

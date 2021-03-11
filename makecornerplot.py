@@ -28,7 +28,7 @@ output=args.destoutput
 
 with open(picklefile ,'rb') as file: results=pickle.load(file)
 pars=results['pars']
-vars= [x for x in ['offset','intrins','velscaling','veldispersion_additional','betarescale'] if x in results['pars']]
+vars= [x for x in ['velscaling','veldispersion_additional','betarescale'] if x in results['pars']]#'offset','intrins',
 labels={'offset':'$\Delta_\mu$','intrins':'$\sigma_{int}$','velscaling':'$A_s$','veldispersion_additional':'$\\sigma_{v+}$','betarescale':'$S_v$'}
 samples=np.array([results['pars'][par] for par in vars]).T
 samples[:,0]-=0.06380

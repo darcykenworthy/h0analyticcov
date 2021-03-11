@@ -48,7 +48,7 @@ parser.add_argument('--optimizing',action='store_true',
                     help='Useful for debugging: don\'t run mcmc, instead just return mode of posterior')
 parser.add_argument('--flatprior',action='store_true',
                     help='Use flat priors on all parameters (default is Jeffreys prior)')
-parser.add_argument('--fixuncorrectedcovariance', action='store_true', 
+parser.add_argument('--fixuncorrectedcovariance',default=False, nargs='?',const=.1,type=float, 
                     help='Fix the scale of the peculiar velocity covariance to 1 for all SNe without a peculiar velocity correction')
 parser.add_argument('--fixcovariance', action='store_true',
                     help='Fix the scale of the peculiar velocity covariance matrix to 1')
@@ -422,7 +422,7 @@ standat = {'N': cut.sum(),
               }
 if args.fixuncorrectedcovariance:
 	cutpecvelcovmu=pecvelcovmu[cut,:][:,cut]
-	uncorrected=z[cut]>.1
+	uncorrected=z[cut]>args.fixuncorrectedcovariance
 	
 	bothcorrected=( (~uncorrected[:,np.newaxis]) & (~uncorrected[np.newaxis,:])  )
 	neithercorrected=( (uncorrected[:,np.newaxis]) & (uncorrected[np.newaxis,:])  )
