@@ -49,7 +49,7 @@ def weightedMean(vals,covs,cut=None):
         chiSquared=np.dot(pulls,pulls)
     return mean,np.sqrt(var),chiSquared
 
-def addredshiftcolumnfromfile(redshiftfile,sndataFull):
+def addredshiftcolumnfromfile(redshiftfile,sndataFull,redshiftcolumn):
 	if redshiftfile.lower().endswith('.fitres'):
 		zvector,evalcolumn=readFitres(redshiftfile)[redshiftcolumn],redshiftcolumn
 		sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector))
@@ -86,7 +86,8 @@ def addredshiftcolumnfromfile(redshiftfile,sndataFull):
 			isgroup=~(zvector == redshifttable['lowz_comb_csp_hst'])
 		sndataFull=np.array(recfunctions.append_fields(sndataFull,'zeval',zvector[zvectorindices]))
 		sndataFull=np.array(recfunctions.append_fields(sndataFull,'isgroup',isgroup[zvectorindices]))
-
+	return sndataFull
+	
 def catcolumnfromotherfitres(initial,additional,column):
 	crossmatchedindices=[]
 	failedcids=[]
@@ -126,11 +127,29 @@ def cutdups(sndataFull,reweight=True):
 				sndataFull[x][inds[0]],sndataFull[x][inds[0]],_=weightedMean(sndataFull[x],sndataFull[x]**2,sndataFull['CID']==name)
 
 	return sndataFull[finalInds].copy()
-def checkposdef(matrix):
+def checkposdef(matrix,condition=1e-10):
 	vals,vecs=linalg.eigh(matrix)
-	if (vals>=0).all(): return matrix
-	covclipped=np.dot(vecs,np.dot(np.diag(np.clip(vals,vals.max()*1e-10,None)),vecs.T))
+	if (vals>=vals.max()*condition).all(): return matrix
+	covclipped=np.dot(vecs,np.dot(np.diag(np.clip(vals,vals.max()*condition,None)),vecs.T))
 	return covclipped 
+def separatevpeccontributions(sndata,sncoords):
+
+	vext,vexterr=159,23 
+	l,lerr = 304 , 11
+	b,berr = 6,13
+	dipolecoord=SkyCoord(l=l,b=b,frame='galactic',unit=u.deg)
+	vpecbulk=vext*np.cos(sncoords.separation(dipolecoord))
+	z=sndata['zCMB']
+	hascorrection=z<.06
+	vpeclocal=np.zeros(sndata.size)
+	vpeclocal[hascorrection]=(sndata['VPEC']-vpecbulk)[hascorrection]
+	vpecbulk=vext*np.cos(sncoords.separation(dipolecoord))
+	vpecbulk[~hascorrection]=sndata['VPEC'][~hascorrection]
+
+
+	sndata=np.array(recfunctions.append_fields(sndata,'VPEC_LOCAL',vpeclocal))
+	sndata=np.array(recfunctions.append_fields(sndata,'VPEC_BULK',vpecbulk))
+	return sndata
 
 def getseparation(sndata):
 	zcmb=sndata['zCMB']
@@ -150,4 +169,4 @@ def getseparation(sndata):
 	angsep=np.empty((sndata.size,sndata.size))
 	for i in range(sndata.size):
 		angsep[i,:]=sncoords.separation(sncoords[i])
-	return separation,angsep
+	return sncoords,separation,angsep
