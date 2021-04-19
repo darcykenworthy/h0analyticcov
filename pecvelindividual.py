@@ -15,7 +15,7 @@ from astropy.coordinates import SkyCoord
 from astropy import units as u, constants
 from astropy.cosmology import FlatLambdaCDM,Planck15
 import pystan
-import re,timeit,pickle,argparse,multiprocessing,os
+import re,timeit,pickle,argparse,multiprocessing,os,sys
 import matplotlib.ticker as mtick
 from os import path
 import hashlib
@@ -59,29 +59,67 @@ parser.add_argument('--intrins',type=float,default=None,
                     help='Fix intrinsic scatter to a given value')
 
 args = parser.parse_args()
-
+print(' '.join(sys.argv))
 fitres=args.fitres
 niter,nchains=args.niter,args.nchains
 outputdir=args.outputdir
 redshiftcut= args.redshiftcut
-pickleoutput='{}.pickle'.format( path.splitext(path.split(fitres)[-1])[0])
 fixintrins=not (args.intrins is None)
 intrins=args.intrins
+dataname=path.splitext(path.split(fitres)[-1])[0]
+dataname+=f'{redshiftcut[0]:.2f}{redshiftcut[1]:.2f}'.replace('.','')
 
-if args.flatprior:
-	pickleoutput='flat_'+pickleoutput
+
+
+model_name=''
+if fixintrins:
+	model_name+='fixintrins_'
+if args.fixveldispersion:
+	model_name+='fixveldispersion_'
+if args.fixcorrectionparams:
+	model_name+='fixedcorrections_'
 if args.sampleprior:
-	pickleoutput='prior_'+pickleoutput
-	
+	model_name='prior_'+model_name
+else:
+	if args.nocorrections:
+		model_name='no2mm_'+model_name
+model_name+='individual'
+
+
+pickleoutput=f'{dataname}.pickle'
 os.makedirs(outputdir,exist_ok=True)
 pickleoutput=path.join(outputdir,pickleoutput)
+
+
 if path.exists(pickleoutput) and not args.clobber and not args.optimizing:
 	raise ValueError('Clobber is false and output file already exists')
 # In[3]:
 
     
 sndataFull=readFitres(fitres)
+sndataFull=renameDups(sndataFull)
 sndata=cutdups(sndataFull,reweight=True)
+if (sndata['DEC']<-90).any():
+	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['RA']=202.303420
+	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['DEC']=11.272390
+
+	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['HOST_RA']=202.306840
+	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['HOST_DEC']=11.275820
+
+
+	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['RA']=330.454458
+	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['DEC']= 13.055306
+
+	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['HOST_RA']=330.456000
+	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['HOST_DEC']= 13.055194
+
+	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['RA']=3.749292
+	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['DEC']=16.335000
+
+
+	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['HOST_RA']=3.750292
+	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['HOST_DEC']=16.333242
+	print('Warning: Special Case fixes for KAIT SNe')
 
 z=sndata['zCMB']
 
@@ -90,7 +128,7 @@ print(f'{cut.sum()} SNe in redshift range {redshiftcut}')
 sndata=sndata[cut].copy()
 z=sndata['zCMB']
 
-sncoords,separation,angsep=getseparation(sndata)
+sncoords,separation,angsep=getseparation(sndata,hostlocs=False)
 sndata=separatevpeccontributions(sndata,sncoords)
 
 try:
@@ -129,12 +167,10 @@ define_additional_data=''
 define_additional_constants=''
 define_additional_params=''
 define_additional_model_quantities=''
-model_name=''
 # In[13]:
 
 
 if fixintrins:
-	model_name+='fixintrins_'
 	define_additional_constants+=f"""
     real<lower=.01,upper=1> intrins={intrins};
     vector[N] sigmamuresids = sqrt(biasscale*square(intrins)+square(muerr));
@@ -148,7 +184,6 @@ else:
 """
 
 if args.fixveldispersion:
-	model_name+='fixveldispersion_'
 	define_additional_constants+="""
     real<lower=10,upper=500> veldispersion_additional=200;
     matrix[N,N] pecvelcovtot=pecvelcov+diag_matrix(rep_vector(square(veldispersion_additional),N));
@@ -161,7 +196,6 @@ else:
 	matrix[N,N] pecvelcovtot=pecvelcov+diag_matrix(rep_vector(square(veldispersion_additional),N));
 """
 if args.fixcorrectionparams:
-	model_name+='fixedcorrections_'
 	define_additional_constants+="""
 	real<lower=10,upper=1000> correctionstd=150;
 """
@@ -175,8 +209,6 @@ else:
 
 if args.flatprior:
 	prior_block="""
-	//lambdacdm prior
-	peculiarvelocities ~ multi_normal(zeros,pecvelcovtot);	
 """
 else:
 	prior_block="""
@@ -200,7 +232,6 @@ prior_block+="""
 	peculiarvelocities ~ multi_normal(zeros,pecvelcovtot);
 """
 if args.sampleprior:
-	model_name='prior_'+model_name
 	calculate_residuals="" 
 else:
 	if args.nocorrections:
@@ -211,7 +242,7 @@ else:
 		calculate_residuals="""
     //2M++ constraints
     vextrescale ~ normal(1,vextfracerr);
-    peculiarvelocities[correctedinds] ~ normal(velcorrections+bulkcorrections[correctedinds],correctionstd);
+    peculiarvelocities[correctedinds] ~ normal(velcorrections+bulkcorrections,correctionstd);
 """ 
 
 	calculate_residuals+="""
@@ -219,7 +250,6 @@ else:
 	muresiduals ~ normal(offset+dmudvpec .* peculiarvelocities, sigmamuresids);
 """
 
-model_name+='individual_model'
 model_code=f"""
 
 data {{
@@ -234,7 +264,7 @@ data {{
     int<lower=0> M; // number of 2M++ local corrections
     int  correctedinds[M]; //indices of SNe with local 2m++ corrections
     vector[M] velcorrections;
-    vector[N] bulkcorrections;
+    vector[M] bulkcorrections;
     matrix[N,N] pecvelcov;
     {define_additional_data}
     
@@ -260,7 +290,7 @@ parameters {{
 }}
 
 transformed parameters {{
-    real vextrescale = dot_product(bulkcorrections,peculiarvelocities)/bulkfiducial ;
+    real vextrescale = dot_product(bulkcorrections,peculiarvelocities[correctedinds])/bulkfiducial ;
 }}
 
 
@@ -281,7 +311,7 @@ else:
 	existingmodelisgood=False
 with open(codefile,'w') as file: file.write(model_code)
 
-hascorrection=sndata['VPEC_LOCAL']!=0
+hascorrection= sndata['zCMB']<0.06
 correctedindices=np.where(hascorrection)[0]
 
 standat = {'N': sndata.size,
@@ -295,7 +325,7 @@ standat = {'N': sndata.size,
                
                'correctedinds': correctedindices+1, #Stan indexes from 1 &*#$*@#^$
                'velcorrections': sndata['VPEC_LOCAL'][correctedindices],
-               'bulkcorrections': sndata['VPEC_BULK'],
+               'bulkcorrections': sndata['VPEC_BULK'][correctedindices],
                
                'pecvelcov':pecvelcov,
               }

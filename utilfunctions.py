@@ -8,17 +8,18 @@ from itertools import combinations
 from astropy.coordinates import SkyCoord
 from astropy import units as u, constants
 from astropy.cosmology import FlatLambdaCDM,Planck15
-import pystan
 import re,timeit,pickle,argparse,multiprocessing,os
 import matplotlib.ticker as mtick
 from os import path
 import hashlib
 import csv
+from v3_0_duplicate_map import dups as dillon_dups
+dillon_dups=dillon_dups[3]
+
+
 cosmo=Planck15
 
 
-sdss=['16314','16392','16333','14318','17186','17784','7876']
-trunames=['2006oa','2006ob','2006on','2006py','2007hx','2007jg','2005ir']
 def readFitres(fileName):			
     with open(fileName,'r') as file : fileText=file.read()
     result=re.compile('VARNAMES:([\w\s]+)\n').search(fileText)
@@ -26,16 +27,15 @@ def readFitres(fileName):
     namesToTypes={'VARNAMES':'U3','CID':'U20','FIELD':'U4','IDSURVEY':int}
     types=[namesToTypes[x] if x in namesToTypes else float for x in names]
     data=np.genfromtxt(fileName,skip_header=fileText[:result.start()].count('\n')+1,dtype=list(zip(names,types)))
-    for sdssName,truName in zip(sdss,trunames):
-            data['CID'][data['CID']==sdssName]=truName
     return data
 
-def weightedMean(vals,covs,cut=None):
+def weightedMean(vals,covs,cut=None,returnpulls=False):
     if cut is None:cut=np.ones(vals.size,dtype=bool)
     if covs.ndim==1:
         vars=covs
         mean=((vals)/vars)[cut].sum()/(1/vars)[cut].sum()
         chiSquared=((vals-mean)**2/vars)[cut].sum()
+        pulls=((vals-mean)/np.sqrt(vars))[cut]
         var=1/((1/vars)[cut].sum())
     else:
         vals=vals[cut]
@@ -47,7 +47,10 @@ def weightedMean(vals,covs,cut=None):
         mean=var*np.dot(design,linalg.solve_triangular(transform,vals,lower=True))
         pulls=linalg.solve_triangular(transform,vals-mean,lower=True)
         chiSquared=np.dot(pulls,pulls)
-    return mean,np.sqrt(var),chiSquared
+    if returnpulls:
+    	return mean,np.sqrt(var),chiSquared,pulls
+    else:
+    	return mean,np.sqrt(var),chiSquared
 
 def addredshiftcolumnfromfile(redshiftfile,sndataFull,redshiftcolumn):
 	if redshiftfile.lower().endswith('.fitres'):
@@ -107,12 +110,40 @@ def writefitres(fitres,data):
 		for row in data:
 			writer.writerow(['SN:']+list(row)[1:])
 
+def renameDups(sndataFull):
+	sndataFull=sndataFull.copy()
+	uniqueids={}
+	coveredcids=set()
+	cids=np.unique(sndataFull['CID'])
+	for cid in (cids):
+		if cid in coveredcids: continue
+		#if cid == '10805': import pdb;pdb.set_trace()
+		coveredcids.add(cid)
+		name,aliases=cid,{cid}
+		while True:
+			for edge in dillon_dups.items():
+				if  (edge[0] in cids) and (edge[1] in cids) and (edge[0] in aliases)^(edge[1] in aliases):
+					aliases.add(edge[0])
+					aliases.add(edge[1])
+					coveredcids.add(edge[0])
+					coveredcids.add(edge[1])
+					break
+			else:
+				break
+		uniqueids[name]=aliases
+
+	for unique in uniqueids:
+		for alias in uniqueids[unique]:
+			sndataFull['CID'][sndataFull['CID']==alias]=unique
+	return sndataFull
 	
-def cutdups(sndataFull,reweight=True):
+def cutdups(sndataFull,reweight=False):
 	accum=[]
 	result=[]
 	finalInds=[]
 	sndataFull=sndataFull.copy()
+	
+	results=[]
 	for name in np.unique(sndataFull['CID']):
 		dups=sndataFull[sndataFull['CID']==name]
 		inds=np.where(sndataFull['CID']==name)[0]
@@ -123,10 +154,11 @@ def cutdups(sndataFull,reweight=True):
 		inds=sorted(inds,key=sortingkey)
 		finalInds+=[inds[0]]
 		if len(inds)>1 and reweight:
-			for x in ['MUERR_RAW','cERR','x1ERR']:
-				sndataFull[x][inds[0]],sndataFull[x][inds[0]],_=weightedMean(sndataFull[x],sndataFull[x]**2,sndataFull['CID']==name)
-
-	return sndataFull[finalInds].copy()
+			sndataFull['MU'][inds[0]],sndataFull['MUERR_RAW'][inds[0]],chisq,resids=weightedMean(sndataFull['MU'],sndataFull['MUERR_RAW']**2,sndataFull['CID']==name,returnpulls=True)
+			results+=[(name,chisq, (sndataFull['CID']==name).sum(),sndataFull[sndataFull['CID']==name]['IDSURVEY'],resids)]
+	return sndataFull[finalInds].copy()#,results
+	
+	
 def checkposdef(matrix,condition=1e-10):
 	vals,vecs=linalg.eigh(matrix)
 	if (vals>=vals.max()*condition).all(): return matrix
@@ -151,12 +183,13 @@ def separatevpeccontributions(sndata,sncoords):
 	sndata=np.array(recfunctions.append_fields(sndata,'VPEC_BULK',vpecbulk))
 	return sndata
 
-def getseparation(sndata):
+def getseparation(sndata,hostlocs=True):
 	zcmb=sndata['zCMB']
+	rakey='HOST_RA' if hostlocs else 'RA'
 	snra=sndata['RA']*u.degree
-	deckey='DEC' if 'DEC' in sndata.dtype.names else 'DECL'
+	deckey=('HOST_' if hostlocs else '')+'DEC' if 'DEC' in sndata.dtype.names else 'DECL'
 	sndec=sndata[deckey]*u.degree
-	sncoords=SkyCoord(ra=sndata['RA'],dec=sndata[deckey],unit=u.deg)
+	sncoords=SkyCoord(ra=snra,dec=sndec,unit=u.deg)
 
 	chi=cosmo.comoving_distance(zcmb).to(u.Mpc).value
 	snpos=np.zeros((sndata.size,3))

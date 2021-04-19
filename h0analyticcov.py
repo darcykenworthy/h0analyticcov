@@ -15,20 +15,7 @@ from math import ceil
 import re,argparse,os
  
 
-sdss=['16314','16392','16333','14318','17186','17784','7876']
-trunames=['2006oa','2006ob','2006on','2006py','2007hx','2007jg','2005ir']
-
-def readFitres(fileName):
-	"""Reads a fitres file into a structured np array"""
-	with open(fileName,'r') as file : fileText=file.read()
-	result=re.compile('VARNAMES:([\w\s]+)\n').search(fileText)
-	names= ['VARNAMES:']+[x for x in result.groups()[0].split() if not x=='']
-	namesToTypes={'VARNAMES':'U3','CID':'U20','FIELD':'U4','IDSURVEY':int}
-	types=[namesToTypes[x] if x in namesToTypes else float for x in names]
-	data=np.genfromtxt(fileName,skip_header=fileText[:result.start()].count('\n')+1,dtype=list(zip(names,types)))
-	for sdssName,truName in zip(sdss,trunames):
-			data['CID'][data['CID']==sdssName]=truName
-	return data
+from utilfunctions import *
 
 def calc_pk_nl_dlog10k(kmin,kspacing,kmax,sig_rsd,background=0):
 	"""Calculate the nonlinear power spectrum in log k with CLASS/halofit for a given minimum k, # of k points, and maximum k, along with a rsd term"""
@@ -123,23 +110,9 @@ if args.outputstem: outputstem+='-'+args.outputstem
 ##########################################################################################    
 
 sndata=readFitres(fitresfile)#sndata=readFitres('../../voidtest/SALT2mu_wcsphst2.fitres')
+sndata=renameDups(sndata)
 if args.cutdups:
-	# Eliminate duplicates
-	finalIndices=[]
-	for name in np.unique(sndata['CID']):
-		dups=sndata[sndata['CID']==name]
-		inds=np.where(sndata['CID']==name)[0]
-		#Prefer non-SDSS surveys
-		if (dups['IDSURVEY']==1).sum()>0 and (dups['IDSURVEY']!=1).sum()>0:
-			cut=dups['IDSURVEY']!=1
-			inds=inds[cut][::-1]
-			dups=dups[cut][::-1]
-		try:
-			finalIndices+=[inds[0]]
-		except:
-			print(name,sndata[sndata['CID']==name]['IDSURVEY'])
-			raise ValueError
-	sndata=sndata[finalIndices].copy()
+	sndata=cutdups(sndata)
 
 # r16names=np.genfromtxt('../voidtest/R16_hubflo.txt',skip_header=3,usecols=0,dtype='U20')
 # r16err=np.genfromtxt('../voidtest/R16_hubflo.txt',skip_header=3,usecols=2)
@@ -148,7 +121,28 @@ cut=( sndata[redshiftkey]>minred) & ( sndata[redshiftkey]<maxred)
 #cut= sndata['zCMB']<.5
 sndata=sndata[cut].copy()
 print(f'Calculating covariance matrix for {sndata.size} SNe')
- 
+if (sndata['DEC']<-90).any():
+	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['RA']=202.303420
+	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['DEC']=11.272390
+
+	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['HOST_RA']=202.306840
+	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['HOST_DEC']=11.275820
+
+
+	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['RA']=330.454458
+	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['DEC']= 13.055306
+
+	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['HOST_RA']=330.456000
+	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['HOST_DEC']= 13.055194
+
+	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['RA']=3.749292
+	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['DEC']=16.335000
+
+
+	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['HOST_RA']=3.750292
+	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['HOST_DEC']=16.333242
+	print('Warning: Special Case fixes for KAIT SNe')
+
 
 #Initialize CLASS
 classparams=classylss.load_ini(inifile)
@@ -254,7 +248,7 @@ velcovoutput='velocitycovariance-{}.npy'.format(outputstem)
 namelistoutput='snnames-{}.npy'.format(outputstem)
 distanceprefactor=D*f * (1+z)/ D_L * 5 /np.log(10)
 #Convert dDdtau from dimensionless to km/s
-velocityprefactor=dDdtau*constants.c/1e3
+velocityprefactor=dDdtau*constants.c.to(units.km/units.s).value
 if separatenonlinear:
 	velocitycovariance=np.outer(velocityprefactor,velocityprefactor)[np.newaxis,:,:]*integralterm
 else:
