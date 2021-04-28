@@ -168,39 +168,34 @@ define_additional_constants=''
 define_additional_params=''
 define_additional_model_quantities=''
 # In[13]:
-
-
+define_vpec_uncertainties="""
+	matrix[N,N] pecvelcovtot=pecvelcov;
+"""
+define_mu_uncertainties="""
+	vector[N] sigmamuresids = sqrt(square(veldispersion_additional*dmudvpec) + biasscale .* (square(intrins)+square(muerr)));
+"""
 if fixintrins:
 	define_additional_constants+=f"""
-    real<lower=.01,upper=1> intrins={intrins};
-    vector[N] sigmamuresids = sqrt(biasscale*square(intrins)+square(muerr));
-"""
+    real<lower=.01,upper=1> intrins={intrins};"""+define_mu_uncertainties
 else:
 	define_additional_params+="""
     real<lower=.01,upper=1> intrins;
 """
-	define_additional_model_quantities+="""
-	vector[N] sigmamuresids = sqrt(biasscale*square(intrins)+square(muerr));
-"""
+	define_additional_model_quantities+=define_mu_uncertainties
 
 if args.fixveldispersion:
 	define_additional_constants+="""
     real<lower=10,upper=500> veldispersion_additional=200;
-    matrix[N,N] pecvelcovtot=pecvelcov+diag_matrix(rep_vector(square(veldispersion_additional),N));
-"""
+"""+define_vpec_uncertainties
 else:
 	define_additional_params+="""
     real<lower=10,upper=500> veldispersion_additional;
 """
-	define_additional_model_quantities+="""
-	matrix[N,N] pecvelcovtot=pecvelcov+diag_matrix(rep_vector(square(veldispersion_additional),N));
-"""
+	define_additional_model_quantities+=define_vpec_uncertainties
 if args.fixcorrectionparams:
 	define_additional_constants+="""
 	real<lower=10,upper=1000> correctionstd=150;
 """
-
-
 else:
 
 	define_additional_params+="""
@@ -241,31 +236,41 @@ else:
 	else:
 		calculate_residuals="""
     //2M++ constraints
-    vextrescale ~ normal(1,vextfracerr);
-    peculiarvelocities[correctedinds] ~ normal(velcorrections+bulkcorrections,correctionstd);
+    peculiarvelocities[tmppinds]~ normal(velcorrections+bulkcorrections,correctionstd);
 """ 
 
 	calculate_residuals+="""
 	//SN constraints
-	muresiduals ~ normal(offset+dmudvpec .* peculiarvelocities, sigmamuresids);
+	muresiduals ~ normal(offset+(dmudvpec .* peculiarvelocities)[sninds], sigmamuresids[sninds]);
+
 """
 
 model_code=f"""
 
 data {{
     int<lower=0> N; // number of SNe
-    vector[N] muresiduals;
     vector<lower=0>[N] muerr; 
     vector[N] biasscale;
-    vector[N] zCMB;
-    
+    vector[N] zCMB;    
     vector[N] dmudvpec;
-
-    int<lower=0> M; // number of 2M++ local corrections
-    int  correctedinds[M]; //indices of SNe with local 2m++ corrections
-    vector[M] velcorrections;
-    vector[M] bulkcorrections;
     matrix[N,N] pecvelcov;
+	
+	int<lower=0> nsnobs;
+	int sninds[nsnobs];
+    vector[nsnobs] muresiduals;
+	
+	int<lower=0> nsnobs_pred;
+	int sninds_pred[nsnobs_pred];
+	vector[nsnobs_pred] mu_excluded;
+
+    int<lower=0> ntmppobs; // number of 2M++ local corrections
+    int  tmppinds[ntmppobs]; //indices of SNe with local 2m++ corrections
+    vector[ntmppobs] velcorrections;
+    vector[ntmppobs] bulkcorrections;
+ 	
+ 	int<lower=0> ntmppobs_pred;
+	int tmppinds_pred[ntmppobs_pred];
+	vector[ntmppobs_pred] tmpp_excluded;
     {define_additional_data}
     
 }}
@@ -290,17 +295,54 @@ parameters {{
 }}
 
 transformed parameters {{
-    real vextrescale = dot_product(bulkcorrections,peculiarvelocities[correctedinds])/bulkfiducial ;
+    real vextrescale = dot_product(bulkcorrections,peculiarvelocities[tmppinds])/bulkfiducial ;
 }}
 
 
 model {{
     
-    
     {define_additional_model_quantities}
 
     {prior_block}
     {calculate_residuals}
+}}
+
+generated quantities {{
+    // elementwise log likelihood
+    real log_likelihood_mu[nsnobs];
+    real log_likelihood_tmpp[ntmppobs];
+    
+    // posterior predictive
+    real mu_hat[nsnobs];
+    real tmpp_hat[ntmppobs];
+    
+    // out of sample prediction
+    real mu_pred[nsnobs_pred];
+    real tmpp_pred[ntmppobs_pred];
+    real log_likelihood_mu_pred[nsnobs_pred];
+    real log_likelihood_tmpp_pred[ntmppobs_pred];
+    
+    {define_additional_model_quantities}
+    // posterior predictive
+    for (k in 1:nsnobs){{
+		log_likelihood_mu[k] = normal_lpdf(muresiduals[k] | offset+(dmudvpec .* peculiarvelocities)[sninds[k]], sigmamuresids[sninds[k]]);
+    }}
+	mu_hat = normal_rng(offset+(dmudvpec .* peculiarvelocities)[sninds], sigmamuresids[sninds]);
+	
+    for (k in 1:ntmppobs){{
+		log_likelihood_tmpp[k] = normal_lpdf(velcorrections[k]+bulkcorrections[k] | peculiarvelocities[tmppinds[k]],correctionstd);
+	}}
+	tmpp_hat = normal_rng(peculiarvelocities[tmppinds],correctionstd);
+ 
+    // out of sample prediction
+	mu_pred = normal_rng(offset+(dmudvpec .* peculiarvelocities)[sninds_pred], sigmamuresids[sninds_pred]);
+    for (k in 1:nsnobs_pred){{
+		log_likelihood_mu_pred[k] = normal_lpdf(mu_excluded[k]|offset+(dmudvpec .* peculiarvelocities)[sninds_pred[k]], sigmamuresids[sninds_pred[k]]);
+	}}
+	tmpp_pred = normal_rng(peculiarvelocities[tmppinds_pred],correctionstd);
+    for (k in 1:ntmppobs_pred){{
+		log_likelihood_tmpp_pred[k] = normal_lpdf(tmpp_excluded[k]|peculiarvelocities[tmppinds_pred[k]],correctionstd);
+	}}
 }}
 """
 codefile=path.join(outputdir,f'{model_name}.stan')
@@ -313,23 +355,31 @@ with open(codefile,'w') as file: file.write(model_code)
 
 hascorrection= sndata['zCMB']<0.06
 correctedindices=np.where(hascorrection)[0]
-
+usesn=np.arange(sndata.size)
 standat = {'N': sndata.size,
-               'muresiduals': muresiduals,
                'muerr': sndata['MUERR_RAW'],
                'biasscale':sndata['biasScale_muCOV'],
-          		'zCMB':sndata['zCMB'],
-          		
+                'systematics': np.zeros((sndata.size,sndata.size)),
+                'zCMB':sndata['zCMB'],
                'dmudvpec':dmudvpec,
-               'M':  len(correctedindices),
-               
-               'correctedinds': correctedindices+1, #Stan indexes from 1 &*#$*@#^$
+               'pecvelcov':pecvelcov,
+           
+               'ntmppobs':  len(correctedindices),
+               'tmppinds': 1+correctedindices,
                'velcorrections': sndata['VPEC_LOCAL'][correctedindices],
                'bulkcorrections': sndata['VPEC_BULK'][correctedindices],
                
-               'pecvelcov':pecvelcov,
+               'nsnobs':len(usesn),
+               'sninds':usesn+1,
+                'muresiduals': muresiduals[usesn],
+                
+               'nsnobs_pred':1,
+               'sninds_pred':np.array([1],dtype=int),
+               'mu_excluded':np.array([0],dtype=float),
+               'ntmppobs_pred':1,
+               'tmppinds_pred':np.array([1],dtype=int),
+               'tmpp_excluded':np.array([0],dtype=float),
               }
-
 if fixintrins:
 	standat['intrins']=intrins
 
@@ -342,6 +392,7 @@ else:
 	print('recompiling model')
 	model = pystan.StanModel(model_code=model_code,model_name=model_name)
 	with open(modelpickleoutput,'wb') as file: pickle.dump(model,file,-1) 
+
 initfun=lambda :{
     'offset': np.random.normal(0,1e-2),
     'velscaling': np.exp(np.random.normal(0,.1)),
@@ -355,7 +406,6 @@ print(opfit)
 
 if not args.optimizing:
 	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=njobs,warmup = min(niter//2,1000),init=initfun)
-	print(fit.stansummary())
 	with open(pickleoutput,'wb') as picklefile: pickle.dump([model,fit,opfit],picklefile,-1)
 
 # In[17]:
