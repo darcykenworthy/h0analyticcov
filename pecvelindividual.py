@@ -328,9 +328,8 @@ parameters {{
 }}
 
 model {{
-{declare_pecvel_quantities}
 {declare_mu_quantities}
-
+{declare_pecvel_quantities}
 {define_pecvel_quantities}
 {define_mu_quantities}
    
@@ -347,9 +346,8 @@ generated quantities{{
 	real log_lik;
 	real log_lik_ex;
 	{{
-{declare_pecvel_quantities}
 {declare_mu_quantities}
-
+{declare_pecvel_quantities}
 {define_pecvel_quantities}
 {define_mu_quantities}
 
@@ -423,11 +421,11 @@ else:
 with open(codefile,'w') as file: file.write(model_code)
 
 if args.nocorrections:
-
+	correctedindices=np.array([],dtype=int)
+else:
 	hascorrection= sndata['zCMB']<0.06
 	correctedindices=np.where(hascorrection)[0]
-else:
-	correctedindices=np.array([],dtype=int)
+
 usesn=np.arange(sndata.size)
 standat = {'N': sndata.size,
                'muerr': sndata['MUERR_RAW'],
