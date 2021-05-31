@@ -172,8 +172,11 @@ declare_pecvel_quantities="""
 	vector[N] pecvelmeanmarginal;
 """
 define_pecvel_quantities="""
+	matrix[N,N] cosmoprior = square(sigmarescale)*pecvelcov;
+	matrix[ntmppobs,ntmppobs] tmppcov= diag_matrix(rep_vector(square(correctionstd),ntmppobs));
+	vector[ntmppobs] tmppmeasuredvel=betarescale*velcorrections+vextrescale*bulkcorrections;
 	if (ntmppobs==0){
-		pecvelcovmarginal=pecvelcov;
+		pecvelcovmarginal=cosmoprior;
 		pecvelmeanmarginal=rep_vector(0,N);
 	}
 	else if (ntmppobs==N){
@@ -181,11 +184,11 @@ define_pecvel_quantities="""
 		matrix[N,N] sumcovtransform_times_priorcov;
 		matrix[N,N] sumcovtransform_times_tmppcov;
 
-		sumcovtransform=cholesky_decompose(pecvelcov+diag_matrix(rep_vector(square(correctionstd),N)));
-		sumcovtransform_times_priorcov=  mdivide_left_tri_low(sumcovtransform,pecvelcov);
-		sumcovtransform_times_tmppcov=  mdivide_left_tri_low(sumcovtransform, diag_matrix(rep_vector(square(correctionstd),N)));
+		sumcovtransform=cholesky_decompose(cosmoprior+tmppcov);
+		sumcovtransform_times_priorcov=  mdivide_left_tri_low(sumcovtransform,cosmoprior);
+		sumcovtransform_times_tmppcov=  mdivide_left_tri_low(sumcovtransform, tmppcov);
 		
-		pecvelmeanmarginal=sumcovtransform_times_priorcov'* mdivide_left_tri_low(sumcovtransform,velcorrections+bulkcorrections);
+		pecvelmeanmarginal=sumcovtransform_times_priorcov'* mdivide_left_tri_low(sumcovtransform,tmppmeasuredvel);
 		pecvelcovmarginal= sumcovtransform_times_tmppcov' *sumcovtransform_times_priorcov ;
 	}
 	else{
@@ -194,19 +197,21 @@ define_pecvel_quantities="""
 		matrix[ntmppobs,ntmppobs] sumcovtransform_times_priorcov;
 		matrix[ntmppobs,ntmppobs] sumcovtransform_times_tmppcov;
 		matrix[ntmppobs,N-ntmppobs] sumcovtransform_times_transfermatrix;
-
-		sumcovtransform=cholesky_decompose(pecvelcov[tmppinds,tmppinds]+diag_matrix(rep_vector(square(correctionstd),ntmppobs)));
-		sumcovtransform_times_priorcov=  mdivide_left_tri_low(sumcovtransform,pecvelcov[tmppinds,tmppinds]);
-		sumcovtransform_times_tmppcov=  mdivide_left_tri_low(sumcovtransform, diag_matrix(rep_vector(square(correctionstd),ntmppobs)));
-		sumcovtransform_times_transfermatrix=  mdivide_left_tri_low(sumcovtransform, pecvelcov[tmppinds,notmppinds] );
-
-		pecvelmeanmarginal[tmppinds]=sumcovtransform_times_priorcov'* mdivide_left_tri_low(sumcovtransform,velcorrections+bulkcorrections);
-		pecvelmeanmarginal[notmppinds]=rep_vector(0,N-ntmppobs);
+		vector[ntmppobs] sumcovtransform_times_tmppmeasuredvel;
+		
+		sumcovtransform=cholesky_decompose(cosmoprior[tmppinds,tmppinds]+tmppcov);
+		sumcovtransform_times_priorcov=  mdivide_left_tri_low(sumcovtransform,cosmoprior[tmppinds,tmppinds]);
+		sumcovtransform_times_tmppcov=  mdivide_left_tri_low(sumcovtransform, tmppcov);
+		sumcovtransform_times_transfermatrix=  mdivide_left_tri_low(sumcovtransform, cosmoprior[tmppinds,notmppinds] );
+		sumcovtransform_times_tmppmeasuredvel=mdivide_left_tri_low(sumcovtransform,tmppmeasuredvel);
+		
+		pecvelmeanmarginal[tmppinds]=sumcovtransform_times_priorcov'* sumcovtransform_times_tmppmeasuredvel;
+		pecvelmeanmarginal[notmppinds]= sumcovtransform_times_transfermatrix'*sumcovtransform_times_tmppmeasuredvel ;
 
 		pecvelcovmarginal[tmppinds,tmppinds]= sumcovtransform_times_tmppcov' *sumcovtransform_times_priorcov ;
 		pecvelcovmarginal[tmppinds,notmppinds]=  sumcovtransform_times_tmppcov' *sumcovtransform_times_transfermatrix ;
 		pecvelcovmarginal[notmppinds,tmppinds]= pecvelcovmarginal[tmppinds,notmppinds]';
-		pecvelcovmarginal[notmppinds,notmppinds]=pecvelcov[notmppinds,notmppinds]- crossprod(sumcovtransform_times_transfermatrix);
+		pecvelcovmarginal[notmppinds,notmppinds]=cosmoprior[notmppinds,notmppinds]- crossprod(sumcovtransform_times_transfermatrix);
 	}
 """
 
@@ -255,12 +260,18 @@ else:
 	offset ~ normal(0,.5);
 	intrins ~ lognormal(log(0.1),.5);
 	
+	//Carrick2015 uncertainties
+	vextrescale ~ normal(1,vextfracerr);
+	betarescale ~ normal(1,betafracerr);
+
 	//2m++ prior (based on N body simulations)
 	correctionstd ~ lognormal(log(150),.5);
-
+	
+	sigmarescale~lognormal(0,.5)
 	veldispersion_additional ~ lognormal(log(250),.5);
 	
 	// inverse improper priors on scale parameters
+	target+=-log(sigmarescale)
 	target+=-log(veldispersion_additional);
 	target+=-log(intrins);
 	target+=-log(correctionstd);
@@ -302,6 +313,8 @@ data {{
 transformed data{{
     vector[N] zeros= rep_vector(0,N);
     cov_matrix[N] identity=diag_matrix(rep_vector(1.0,N));
+	real vextfracerr= 23./159;
+	real betafracerr= 0.021/0.431; 
 
     int notmppinds[N-ntmppobs];
     int j=1;
@@ -325,6 +338,9 @@ transformed data{{
 parameters {{
     real<offset=0,multiplier=.1> offset;    
     {define_additional_params}
+	real<offset=0,multiplier=1> betarescale;
+	real<offset=0,multiplier=1> vextrescale;
+	real<lower=.01,upper=10> sigmarescale;
 }}
 
 model {{
