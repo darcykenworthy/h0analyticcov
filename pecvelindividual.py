@@ -46,8 +46,6 @@ parser.add_argument('--optimizing',action='store_true',
                     help='Useful for debugging: don\'t run mcmc, instead just return mode of posterior')
 parser.add_argument('--nocorrections',action='store_true',
 					help='No 2M++ corrections')
-
-					
 					
 parser.add_argument('--fixcorrectionparams',action='store_true',
 					help='Fix 2M++ nuisance parameters to fiducial values')
@@ -69,8 +67,10 @@ outputdir=args.outputdir
 redshiftcut= args.redshiftcut
 fixintrins=not (args.intrins is None)
 intrins=args.intrins
-dataname=path.splitext(path.split(fitres)[-1])[0]
-dataname+=f'_{redshiftcut[0]:.2f}_{redshiftcut[1]:.2f}'.replace('.','')
+data_name=path.splitext(path.split(fitres)[-1])[0]
+if args.nocorrections:
+	data_name+='_no2mm'
+data_name+=f'_{redshiftcut[0]:.2f}_{redshiftcut[1]:.2f}'.replace('.','')
 
 
 
@@ -82,14 +82,18 @@ if args.fixveldispersion:
 if args.fixcorrectionparams:
 	model_name+='fixedcorrections_'
 if args.sampleprior:
-	model_name='prior_'+model_name
+	model_name+='prior_'+model_name
+if args.generatedquantities:
+	model_name+='generated_quantities_'
 model_name+='individual'
 
 
-pickleoutput=f'{model_name}_{dataname}.pickle'
 os.makedirs(outputdir,exist_ok=True)
-pickleoutput=path.join(outputdir,pickleoutput)
-
+pickleoutput=path.join(outputdir,f'output_{model_name}_{data_name}.pickle')
+extractoutput=path.join(outputdir,f'extract_{model_name}_{data_name}.pickle')
+codefile=path.join(outputdir,f'code_{model_name}.stan')
+modelpickleoutput=path.join(outputdir,f'compiled_{model_name}.pickle')
+datapickleoutput=path.join(outputdir,f'data_{data_name}.pickle')
 
 if path.exists(pickleoutput) and not args.clobber and not args.optimizing:
 	raise ValueError('Clobber is false and output file already exists')
@@ -127,7 +131,6 @@ cut= (z>redshiftcut[0])&(z<redshiftcut[1])
 print(f'{cut.sum()} SNe in redshift range {redshiftcut}')
 sndata=sndata[cut].copy()
 z=sndata['zCMB']
-
 sncoords,separation,angsep=getseparation(sndata,hostlocs=False)
 sndata=separatevpeccontributions(sndata,sncoords)
 
@@ -428,7 +431,6 @@ generated quantities{{
 # 	}}
 # }}
 
-codefile=path.join(outputdir,f'{model_name}.stan')
 if path.exists(codefile):
 	with open(codefile,'r') as file: oldcode=file.read()
 	existingmodelisgood= oldcode==model_code	
@@ -470,8 +472,7 @@ standat = {'N': sndata.size,
 if fixintrins:
 	standat['intrins']=intrins
 
-modelpickleoutput=path.join(outputdir,f'{model_name}.pickle')
-with open(path.join(outputdir,'data_'+path.basename(pickleoutput)),'wb') as file: pickle.dump(standat,file,-1) 
+with open(datapickleoutput,'wb') as file: pickle.dump(standat,file,-1) 
 if existingmodelisgood and path.exists(modelpickleoutput):
 	print('reloading model from existing file')
 	with open(modelpickleoutput,'rb') as file: model=pickle.load(file) 
@@ -493,7 +494,7 @@ print(opfit)
 if not args.optimizing:
 	fit = model.sampling(data=standat, iter=niter, chains=nchains,n_jobs=njobs,warmup = min(niter//2,1000),init=initfun)
 	with open(pickleoutput,'wb') as picklefile: pickle.dump([model,fit,opfit],picklefile,-1)
-
+	with open(extractoutput,'wb') as picklefile: pickle.dump(fit.extract(),picklefile,-1)
 # In[17]:
 
 
