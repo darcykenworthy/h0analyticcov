@@ -307,7 +307,7 @@ else:
 	target+=-log(correctionstd);
 """
 	if args.correlatetmpp:
-		prior_block+="""tmppcorscale~lognormal(log(10),.5);
+		prior_block+="""tmppcorscale~lognormal(log(10),1);
 """
 if args.sampleprior:
 	calculate_residuals=""

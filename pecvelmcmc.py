@@ -15,7 +15,7 @@ from astropy.coordinates import SkyCoord
 from astropy import units as u, constants
 from astropy.cosmology import FlatLambdaCDM,Planck15
 import pystan
-import re,timeit,pickle,argparse,multiprocessing,os
+import re,timeit,pickle,argparse,multiprocessing,os,sys
 import matplotlib.ticker as mtick
 from os import path
 import hashlib
@@ -65,7 +65,7 @@ parser.add_argument('--njobs', type=int,default=0,
 parser.add_argument('--clobber', action='store_true', 
                     help='Overwrite existing final output file')
 args = parser.parse_args()
-
+print(args)
 fitres=args.fitres
 redshiftfile=args.redshiftfile
 redshiftcolumn=args.zkey
@@ -305,6 +305,8 @@ if fixintrins:
 	standat['intrins']=intrins
 
 modelpickleoutput=path.join(outputdir,f'{model_name}.pickle')
+print(f'model file: {codefile}')
+print(f'output file: {pickleoutput}')
 with open(path.join(outputdir,'data_'+path.basename(pickleoutput)),'wb') as file: pickle.dump(standat,file,-1) 
 if existingmodelisgood and path.exists(modelpickleoutput):
 	print('reloading model from existing file')
