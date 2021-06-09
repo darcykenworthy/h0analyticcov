@@ -380,6 +380,7 @@ if args.generatedquantities:
 	model_code+=f"""
 generated quantities{{
 	vector[nsnobs] mu_hat;
+	vector[ntmppobs] vlin_hat;
 	vector[nsnobs_pred] mu_pred;
 	real log_lik;
 	real log_lik_ex;
@@ -388,7 +389,7 @@ generated quantities{{
 {declare_pecvel_quantities}
 {define_pecvel_quantities}
 {define_mu_quantities}
-
+		vlin_hat=multi_normal_rng(pecvelmeanmarginal[tmppinds], pecvelcovmarginal[tmppinds,tmppinds]);
 		log_lik = multi_normal_lpdf( muresiduals|meanmuresids[sninds], covsigmamuresids[sninds,sninds] );
 		mu_hat = multi_normal_rng(meanmuresids[sninds], covsigmamuresids[sninds,sninds] );
 		if (nsnobs_pred !=0){{
