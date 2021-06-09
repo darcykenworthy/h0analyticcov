@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[19]:
 
 
 import numpy as np
@@ -10,179 +10,150 @@ from numpy.lib import recfunctions
 import matplotlib.pyplot as plt
 from scipy import optimize as op,linalg,stats
 from itertools import combinations
-import csv
-
 
 from astropy.coordinates import SkyCoord
-from astropy import units as u, constants
+from astropy import units as u, constants,coordinates as coord
 from astropy.cosmology import FlatLambdaCDM,Planck15
-import pystan
-import re,timeit,pickle,argparse,multiprocessing,os,tqdm
+
+import re,timeit,pickle,argparse,multiprocessing,os
 import matplotlib.ticker as mtick
 from os import path
+import time
 cosmo=Planck15
+import utilfunctions 
+import tqdm
+import csv
+
+import matplotlib as mpl
+plt.rcParams['font.size'] = 10
 
 
-# In[2]:
-
+# In[12]:
 
 parser = argparse.ArgumentParser(description='Calculate predicted peculiar velocity correction and covariance between supernovae from results of MCMC ')
-parser.add_argument('marginalpickle',type=str, nargs='+',
+parser.add_argument('extractpickle',type=str,
                     help='File with MCMC chain')
 parser.add_argument('fitres',type=str, 
                     help='File with SNe')
 parser.add_argument('--destoutput',type=str,default=None, 
                     help='Path to write pickle with bias and covariance')
+parser.add_argument('--nsamples',type=int,default=1000, 
+                    help='Number of samples to draw from posterior')
+
 args = parser.parse_args()
-picklefile=args.marginalpickle[0]
 fitres=args.fitres
-output=args.destoutput if not  args.destoutput is None else path.join(path.dirname(picklefile), 'posteriorbiascov_'+path.basename(picklefile) )
-# In[3]:
-
-sdss=['16314','16392','16333','14318','17186','17784','7876']
-trunames=['2006oa','2006ob','2006on','2006py','2007hx','2007jg','2005ir']
-def readFitres(fileName):			
-    with open(fileName,'r') as file : fileText=file.read()
-    result=re.compile('VARNAMES:([\w\s]+)\n').search(fileText)
-    names= ['VARNAMES:']+[x for x in result.groups()[0].split() if not x=='']
-    namesToTypes={'VARNAMES':'U3','CID':'U20','FIELD':'U4','IDSURVEY':int}
-    types=[namesToTypes[x] if x in namesToTypes else float for x in names]
-    data=np.genfromtxt(fileName,skip_header=fileText[:result.start()].count('\n')+1,dtype=list(zip(names,types)))
-    for sdssName,truName in zip(sdss,trunames):
-            data['CID'][data['CID']==sdssName]=truName
-    return data
-def weightedMean(vals,covs,cut=None):
-    if cut is None:cut=np.ones(vals.size,dtype=bool)
-    if covs.ndim==1:
-        vars=covs
-        mean=((vals)/vars)[cut].sum()/(1/vars)[cut].sum()
-        chiSquared=((vals-mean)**2/vars)[cut].sum()
-        var=1/((1/vars)[cut].sum())
-    else:
-        vals=vals[cut]
-        covs=covs[cut[:,np.newaxis]&cut[np.newaxis,:]].reshape((cut.sum(),cut.sum()))
-        #Use cholesky transform instead of numerical inversion of symmetric matrix
-        transform=np.linalg.cholesky(covs)
-        design=linalg.solve_triangular(transform,np.ones(vals.size),lower=True)
-        var=1/np.dot(design,design)
-        mean=var*np.dot(design,linalg.solve_triangular(transform,vals,lower=True))
-        pulls=linalg.solve_triangular(transform,vals-mean,lower=True)
-        chiSquared=np.dot(pulls,pulls)
-    return mean,np.sqrt(var),chiSquared
-
-sndataFull=readFitres(fitres)
+output=args.destoutput if not  args.destoutput is None else path.join(path.dirname(args.extractpickle), path.basename(args.extractpickle).replace('extract_','posteriorbiascov_') )
+nsamples=args.nsamples
+sndatadups=utilfunctions.readFitres(fitres)
+sndataFull=sndatadups.copy()
+#sndataFull['MUERR_RAW']=np.sqrt(sndataFull['MUERR_RAW']**2-sndataFull['MUERR_VPEC']**2)
+sndatadups=utilfunctions.renameDups(sndatadups)
+sndataFull=utilfunctions.cutdups(sndatadups,reweight=True)
+#
 
 
-
-accum=[]
-result=[]
-finalInds=[]
-sndataNoDups=sndataFull.copy()
-for name in np.unique(sndataNoDups['CID']):
-    dups=sndataNoDups[sndataNoDups['CID']==name]
-    inds=np.where(sndataNoDups['CID']==name)[0]
-# #    Prefer non-SDSS surveys
-#     if (dups['IDSURVEY']==1).sum()>0 and (dups['IDSURVEY']!=1).sum()>0:
-#         cut=dups['IDSURVEY']!=1
-#         inds=inds[cut][::-1]
-    if (dups['IDSURVEY']==4).sum()>0:
-        cut=dups['IDSURVEY']==4
-        inds=inds[cut]
-    elif (dups['IDSURVEY']==1).sum()>0:
-        cut=dups['IDSURVEY']==1
-        inds=inds[cut]
-    elif (dups['IDSURVEY']==15).sum()>0:
-        cut=dups['IDSURVEY']==15
-        inds=inds[cut]
-
-    finalInds+=[inds[0]]
-
-sndataNoDups=sndataNoDups[finalInds].copy()
-sndata=sndataNoDups.copy()
-pecvelcov=np.load('velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))
-
-correction=(cosmo.distmod(sndata['zCMB']) - cosmo.distmod(sndata['zHD']) ).value
+sndata=sndataFull
+#sndata=sndataFull.copy()
 z=sndata['zCMB']
-zcmb=sndata['zCMB']
-snra=sndata['RA']*u.degree
-deckey='DEC' if 'DEC' in sndata.dtype.names else 'DECL'
-sndec=sndata[deckey]*u.degree
-sncoords=SkyCoord(ra=sndata['RA'],dec=sndata[deckey],unit=u.deg)
+if (sndata['DEC']<-90).any():
+    sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['RA']=202.303420
+    sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['DEC']=11.272390
 
-chi=cosmo.comoving_distance(zcmb).to(u.Mpc).value
-snpos=np.zeros((sndata.size,3))
-snpos[:,0]=np.cos(sndec)*np.sin(snra)
-snpos[:,1]=np.cos(sndec)*np.cos(snra)
-snpos[:,2]=np.sin(sndec)
-snpos*=chi[:,np.newaxis]
+    sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['HOST_RA']=202.306840
+    sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['HOST_DEC']=11.275820
 
-def checkposdef(matrix):
-	vals,vecs=linalg.eigh(matrix)
-	if (vals>=0).all(): return matrix
-	covclipped=np.dot(vecs,np.dot(np.diag(np.clip(vals,vals.max()*1e-10,None)),vecs.T))
-	return covclipped 
-separation=np.sqrt(((snpos[:,np.newaxis,:]-snpos[np.newaxis,:,:])**2).sum(axis=2))
-nonlinear=separation==0
+    if 'SNF20080909-030' in sndata['CID']:
+        sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['RA']=330.454458
+        sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['DEC']= 13.055306
+
+        sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['HOST_RA']=330.456000
+        sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['HOST_DEC']= 13.055194
+
+    sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['RA']=3.749292
+    sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['DEC']=16.335000
+    
+
+    sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['HOST_RA']=3.750292
+    sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['HOST_DEC']=16.333242
+assert(sndata['DEC']>-90).all()
+
+
+sncoords,separation,angsep=utilfunctions.getseparation(sndata,hostlocs=False)
+sndata=utilfunctions.separatevpeccontributions(sndata,sncoords)
+
+
+
+zmin=0.06
+hascorrection=z<zmin
+
+
+# In[13]:
+
+
+z=sndata['zCMB']
 dmudvpec=5/np.log(10)*((1+z)**2/(cosmo.efunc(z)*cosmo.H0*cosmo.luminosity_distance(z))).to(u.s/u.km).value
-velocityprefactor=np.outer(dmudvpec,dmudvpec)
-pecvelcov=checkposdef(pecvelcov)
-pecvelcovmu=velocityprefactor*(pecvelcov)
-nonlinearmu=velocityprefactor*(nonlinear)
-pecvelcovmu=checkposdef(pecvelcovmu)
-nonlinearmu=checkposdef(nonlinearmu)
+pecvelcov=np.load('velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))
+pecvelcov=utilfunctions.checkposdef(pecvelcov)
 
-uncorrected=z>.1
 
-bothcorrected=( (~uncorrected[:,np.newaxis]) & (~uncorrected[np.newaxis,:])  )
-neithercorrected=( (uncorrected[:,np.newaxis]) & (uncorrected[np.newaxis,:])  )
-onecorrected=~ (neithercorrected | bothcorrected)
-print(f'{uncorrected.sum()} SNe with no correction and {uncorrected.size-uncorrected.sum()} SNe with correction')
-pecvelcovmubothcorrected=pecvelcovmu * bothcorrected
-pecvelcovmuonecorrected=pecvelcovmu*onecorrected
-pecvelcovmuuncorrected= pecvelcovmu *neithercorrected
 
-with open(picklefile,'rb') as file:  model,fit,opfit=pickle.load(file)
-with open(path.join(path.dirname(picklefile), 'data_'+path.basename(picklefile) ),'rb') as file: data=pickle.load(file)
 
-velscaling=fit.extract('velscaling')['velscaling']
-veldispersion=fit.extract('veldispersion_additional')['veldispersion_additional']
-if 'betarescale' in fit.extract().keys():
-	betarescale=fit.extract(['betarescale'])['betarescale']
-else:
-	betarescale=np.zeros(velscaling.size)
+# In[14]:
 
-marginalizedcorrection=-np.mean(betarescale)*correction
-scalecov=np.var(betarescale)*np.outer(correction,correction)
-lowzmargpecvelcovmu=np.mean(velscaling**2)*pecvelcovmubothcorrected 
-margpecvelcovmu=np.mean(velscaling**2)*pecvelcovmubothcorrected+np.mean(velscaling)*pecvelcovmuonecorrected+pecvelcovmuuncorrected
-margnonlinearmu=np.mean(veldispersion**2)*nonlinearmu
-marginalizedcov=scalecov + margpecvelcovmu+margnonlinearmu
-print(f'{np.std(betarescale)}, {np.sqrt(np.mean(velscaling**2))}, {np.sqrt(np.mean(veldispersion**2))}')
 
-if len(args.marginalpickle)>1:
-	marginalizedcovsecondary=[]
-	for picklefile in args.marginalpickle[1:]:
-		
-		with open(picklefile,'rb') as file:  model,fit,opfit=pickle.load(file)
-		velscaling=fit.extract('velscaling')['velscaling']
-		veldispersion=fit.extract('veldispersion_additional')['veldispersion_additional']
-		if 'betarescale' in fit.extract().keys():
-			betarescale=fit.extract(['betarescale'])['betarescale']
-		else:
-			betarescale=np.zeros(velscaling.size)
-		marginalizedcovsecondary+=[np.var(betarescale)*np.outer(correction,correction) +np.mean(velscaling**2)*pecvelcovmubothcorrected+np.mean(velscaling)*pecvelcovmuonecorrected+pecvelcovmuuncorrected+np.mean(veldispersion**2)*nonlinearmu]
+    
+
+
+
+# In[22]:
+
+
+def posterior(prior,pred,constraint,hasconstraint):
+        
+        sumcovtransform=linalg.cholesky(prior[hasconstraint,:][:,hasconstraint]+constraint,lower=True)
+        sumcovtransform_times_priorcov= linalg.solve_triangular(sumcovtransform,prior[hasconstraint,:][:,hasconstraint],lower=True);
+        sumcovtransform_times_tmppcov=  linalg.solve_triangular(sumcovtransform, constraint,lower=True);
+        sumcovtransform_times_transfermatrix=  linalg.solve_triangular(sumcovtransform, prior[hasconstraint,:][:,~hasconstraint] ,lower=True);
+        pecvelmeanmarginal= np.empty(prior.shape[0])
+        pecvelmeanmarginal[hasconstraint]=np.dot(sumcovtransform_times_priorcov.T ,linalg.solve_triangular(sumcovtransform,pred,lower=True));
+        pecvelmeanmarginal[~hasconstraint]=np.dot(sumcovtransform_times_transfermatrix.T ,linalg.solve_triangular(sumcovtransform,pred,lower=True));
+        
+        pecvelcovmarginal=np.empty(prior.shape)
+        pecvelcovmarginal[np.outer(hasconstraint,hasconstraint  )]= (np.dot(sumcovtransform_times_tmppcov.T ,sumcovtransform_times_priorcov )).flatten()
+        pecvelcovmarginal[np.outer(hasconstraint,~hasconstraint)] = (np.dot(sumcovtransform_times_tmppcov.T ,sumcovtransform_times_transfermatrix) ).flatten()
+        pecvelcovmarginal[np.outer(~hasconstraint,hasconstraint)] = (pecvelcovmarginal[np.outer(hasconstraint,~hasconstraint)].T).flatten()
+        pecvelcovmarginal[np.outer(~hasconstraint,~hasconstraint)]= prior[np.outer(~hasconstraint,~hasconstraint)]- (np.dot(sumcovtransform_times_transfermatrix.T,sumcovtransform_times_transfermatrix)).flatten()
+        return pecvelmeanmarginal,pecvelcovmarginal
+with open(args.extractpickle,'rb') as file:
+    samplingrun=pickle.load(file)
+
+marginalizedvelmean,marginalizedvelcov=np.empty((sndata.size,nsamples)),np.empty((sndata.size,sndata.size,nsamples))
+
+for index,i in tqdm.tqdm(enumerate(np.random.randint(0,samplingrun['offset'].size,nsamples)),total=nsamples):
+    post,postcov=posterior(samplingrun['sigmarescale'][i]**2*pecvelcov,(samplingrun['betarescale'][i]*sndata['VPEC_LOCAL']+samplingrun['vextrescale'][i]*sndata['VPEC_BULK'])[hascorrection],np.diag(np.ones(hascorrection.sum())*samplingrun['correctionstd'][i]**2),hascorrection)
+    marginalizedvelmean[:,index]=post
+    marginalizedvelcov[:,:,index]=postcov+np.diag(np.ones(sndata.size)*samplingrun['veldispersion_additional'][i])
+marginalizedvelmean,marginalizedvelcov=np.mean(marginalizedvelmean,axis=-1),np.mean(marginalizedvelcov,axis=-1)+np.cov(marginalizedvelmean)
+
 cid=sndata['CID']
 zcmb=sndata['zCMB']
+marginalizedcorrection,marginalizedcov=dmudvpec*marginalizedvelmean,np.outer(dmudvpec,dmudvpec)*marginalizedvelcov
+
+
+# In[23]:
 with open(output,'wb') as file: pickle.dump((marginalizedcorrection,marginalizedcov),file)
+
 csvoutput=output.replace('pickle','csv')
 with open(csvoutput,'w') as file:
-    writer=csv.writer(file,delimiter=',')
-    writer.writerow(['CID_1','zCMB_1','MU_VEL_CORRECTION_1','CID_2','zCMB_2','MU_VEL_CORRECTION_1','MU_VEL_COVARIANCE','SCALE_COVARIANCE','NONLINEAR_COVARIANCE','LINEAR_COVARIANCE','LOWZ_LINEAR_COVARIANCE','FIDUCIAL_LINEAR_COVARIANCE']+[f'COVARIANCE_VARIANT_{k}' for k  in range(len(marginalizedcovsecondary))])
-    for i in range(sndata.size):
-        for j in range(sndata.size):
-           writer.writerow([cid[i],zcmb[i],marginalizedcorrection[i],cid[j],zcmb[j],marginalizedcorrection[j],marginalizedcov[i,j],scalecov[i,j],margnonlinearmu[i,j],margpecvelcovmu[i,j],lowzmargpecvelcovmu[i,j],pecvelcovmu[i,j]]+[marginalizedcovsecondary[k][i,j] for k  in range(len(marginalizedcovsecondary))])
-print(f'Output written to {output} and {csvoutput}')
+	writer=csv.writer(file,delimiter=',')
+	writer.writerow(['CID_1','zCMB_1','MU_VEL_CORRECTION_1','CID_2','zCMB_2','MU_VEL_CORRECTION_1','MU_VEL_COVARIANCE'])
+	for i in range(sndata.size):
+		for j in range(sndata.size):
+		   writer.writerow([cid[i],zcmb[i],marginalizedcorrection[i],cid[j],zcmb[j],marginalizedcorrection[j],marginalizedcov[i,j]])
+
+
+# In[ ]:
 
 
 
-#(betarescale-np.mean(betarescale)[np.newaxis,np.newaxis,:])**2*np.outer(correction,correction)[:,:,np.newaxis] + velscaling[np.newaxis,np.newaxis,:] **2 * pecvelcovmu[:,:,np.newaxis] + veldispersion[np.newaxis,np.newaxis,:]**2 * nonlinearmu[:,:,np.newaxis]
+

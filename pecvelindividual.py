@@ -47,6 +47,8 @@ parser.add_argument('--optimizing',action='store_true',
 parser.add_argument('--nocorrections',action='store_true',
 					help='No 2M++ corrections')
 					
+parser.add_argument('--correlatetmpp',action='store_true',
+					help='Do not assume 2M++ errors are uncorrelated')
 parser.add_argument('--fixcorrectionparams',action='store_true',
 					help='Fix 2M++ nuisance parameters to fiducial values')
 parser.add_argument('--fixveldispersion',action='store_true',
@@ -75,6 +77,8 @@ data_name+=f'_{redshiftcut[0]:.2f}_{redshiftcut[1]:.2f}'.replace('.','')
 
 
 model_name=''
+if args.correlatetmpp:
+	model_name+='correlatetmpp_'
 if fixintrins:
 	model_name+='fixintrins_'
 if args.fixveldispersion:
@@ -174,9 +178,25 @@ declare_pecvel_quantities="""
 	matrix[N,N] pecvelcovmarginal;
 	vector[N] pecvelmeanmarginal;
 """
-define_pecvel_quantities="""
+
+if args.correlatetmpp:
+	define_additional_params+="""
+	real<lower=0,upper=200> tmppcorscale;
+"""
+	define_additional_constants+="""
+	matrix[N,N] separationsq=square(separation);
+"""
+	define_pecvel_quantities="""
+	matrix[N,N] cosmoprior = square(sigmarescale)*pecvelcov;
+	matrix[ntmppobs,ntmppobs] tmppcov= square(correctionstd) * exp( - separationsq[tmppinds,tmppinds]/ square(tmppcorscale) );
+"""
+else: 
+	define_pecvel_quantities="""
 	matrix[N,N] cosmoprior = square(sigmarescale)*pecvelcov;
 	matrix[ntmppobs,ntmppobs] tmppcov= diag_matrix(rep_vector(square(correctionstd),ntmppobs));
+"""
+
+define_pecvel_quantities+="""
 	vector[ntmppobs] tmppmeasuredvel=betarescale*velcorrections+vextrescale*bulkcorrections;
 	if (ntmppobs==0){
 		pecvelcovmarginal=cosmoprior;
@@ -229,11 +249,10 @@ define_mu_quantities="""
 	covsigmamuresids=quad_form_diag(pecvelcovmarginal,dmudvpec)+diag_matrix(muresidsvar);
 """
 if fixintrins:
-	define_additional_constants+=f"""
-    real<lower=.01,upper=1> intrins={intrins};"""
+	define_additional_constants+=f"""real<lower=.01,upper=1> intrins={intrins};
+"""
 else:
-	define_additional_params+="""
-    real<lower=.01,upper=1> intrins;
+	define_additional_params+="""real<lower=.01,upper=1> intrins;
 """
 
 if args.fixveldispersion:
@@ -241,23 +260,21 @@ if args.fixveldispersion:
     real<lower=10,upper=500> veldispersion_additional=200;
 """
 else:
-	define_additional_params+="""
-    real<lower=10,upper=500> veldispersion_additional;
+	define_additional_params+="""real<lower=10,upper=500> veldispersion_additional;
 """
 if args.fixcorrectionparams:
-	define_additional_constants+="""
-	real<lower=10,upper=1000> correctionstd=150;
+	define_additional_constants+="""real<lower=10,upper=1000> correctionstd=150;
 """
 else:
 
-	define_additional_params+="""
-	real<lower=10,upper=1000> correctionstd;
+	define_additional_params+="""real<lower=10,upper=1000> correctionstd;
 """
 
 if args.flatprior:
 	prior_block="""
 """
 else:
+	
 	prior_block="""
 	//SN priors
 	offset ~ normal(0,.5);
@@ -269,18 +286,18 @@ else:
 
 	//2m++ prior (based on N body simulations)
 	correctionstd ~ lognormal(log(150),.5);
-	
-	sigmarescale~lognormal(0,.5)
+	sigmarescale~lognormal(0,.5);
 	veldispersion_additional ~ lognormal(log(250),.5);
 	
 	// inverse improper priors on scale parameters
-	target+=-log(sigmarescale)
+	target+=-log(sigmarescale);
 	target+=-log(veldispersion_additional);
 	target+=-log(intrins);
 	target+=-log(correctionstd);
 """
-
-
+	if args.correlatetmpp:
+		prior_block+="""tmppcorscale~lognormal(log(10),.5);
+"""
 if args.sampleprior:
 	calculate_residuals=""
 else:
@@ -298,6 +315,7 @@ data {{
     vector[N] zCMB;    
     vector[N] dmudvpec;
     matrix[N,N] pecvelcov;
+	matrix[N,N] separation;
 	
 	int<lower=0> nsnobs;
 	int sninds[nsnobs];
@@ -320,6 +338,8 @@ transformed data{{
 	real betafracerr= 0.021/0.431; 
 
     int notmppinds[N-ntmppobs];
+{define_additional_constants}
+
     int j=1;
     int k=1;
     for (i in 1:ntmppobs){{
@@ -335,7 +355,6 @@ transformed data{{
     	k=k+1;
     	j=j+1;
     }}
-{define_additional_constants}
 }}
 
 parameters {{
@@ -452,7 +471,8 @@ standat = {'N': sndata.size,
                 'zCMB':sndata['zCMB'],
                'dmudvpec':dmudvpec,
                'pecvelcov':pecvelcov,
-           
+           		'separation':separation,
+           		
                'ntmppobs':  len(correctedindices),
                'tmppinds': 1+correctedindices,
                'velcorrections': sndata['VPEC_LOCAL'][correctedindices],
