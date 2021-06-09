@@ -141,7 +141,7 @@ cut= (z>redshiftcut[0])&(z<redshiftcut[1])
 print(f'{cut.sum()} SNe in redshift range {redshiftcut}')
 sndata=sndata[cut].copy()
 z=sndata['zCMB']
-sncoords,separation,angsep=getseparation(sndata,hostlocs=False)
+sncoords,snpos,sep,angsep=getpositions(sndata,hostlocs=False)
 sndata=separatevpeccontributions(sndata,sncoords)
 
 try:
@@ -172,12 +172,10 @@ dmudvpec=5/np.log(10)*((1+z)**2/(cosmo.efunc(z)*cosmo.H0*cosmo.luminosity_distan
 velocityprefactor=np.outer(dmudvpec,dmudvpec)
 
 pecvelcov=np.load('velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))[cut,:][:,cut]
-nonlinear=(separation==0).astype(float)
 
 
 
 pecvelcov=checkposdef(pecvelcov)
-nonlinear=checkposdef(nonlinear)
 
 
 
@@ -194,12 +192,10 @@ if args.correlatetmpp:
 	define_additional_params+="""
 	real<lower=0,upper=200> tmppcorscale;
 """
-	define_additional_constants+="""
-	matrix[N,N] separationsq=square(separation);
-"""
 	define_pecvel_quantities="""
 	matrix[N,N] cosmoprior = square(sigmarescale)*pecvelcov;
-	matrix[ntmppobs,ntmppobs] tmppcov= square(correctionstd) * exp( - separationsq[tmppinds,tmppinds]/ square(tmppcorscale) );
+	matrix[ntmppobs,ntmppobs] tmppcov= cov_exp_quad( positions[tmppinds],correctionstd, tmppcorscale);
+
 """
 else: 
 	define_pecvel_quantities="""
@@ -326,7 +322,7 @@ data {{
     vector[N] zCMB;    
     vector[N] dmudvpec;
     matrix[N,N] pecvelcov;
-	matrix[N,N] separation;
+	vector[3] positions[N];
 	
 	int<lower=0> nsnobs;
 	int sninds[nsnobs];
@@ -395,7 +391,10 @@ generated quantities{{
 	vector[nsnobs_pred] mu_pred;
 	real log_lik;
 	real log_lik_ex;
+	vector[nsnobs] log_lik_pointwise;
 	{{
+		vector[nsnobs] pointwisemustd;
+		vector[nsnobs] pointwisemumean;
 {declare_mu_quantities}
 {declare_pecvel_quantities}
 {define_pecvel_quantities}
@@ -420,6 +419,12 @@ generated quantities{{
 		
 			log_lik_ex=multi_normal_lpdf(mu_excluded| meanpred,   sigmamupred);
 			mu_pred= multi_normal_rng(meanpred, sigmamupred);
+			
+		}}
+		pointwisemustd=  1 ./ diagonal(inverse_spd(covsigmamuresids[sninds,sninds]));
+		pointwisemumean =  muresiduals -  pointwisemustd .* mdivide_left_spd(covsigmamuresids[sninds,sninds], muresiduals-meanmuresids[sninds]);
+		for (i in 1:nsnobs){{
+			log_lik_pointwise[i]=normal_lpdf( muresiduals[i] | pointwisemumean[i], pointwisemustd [i]);
 		}}
 	}}
 }}
@@ -448,7 +453,7 @@ standat = {'N': sndata.size,
                 'zCMB':sndata['zCMB'],
                'dmudvpec':dmudvpec,
                'pecvelcov':pecvelcov,
-           		'separation':separation,
+           		'positions':snpos,
            		
                'ntmppobs':  len(correctedindices),
                'tmppinds': 1+correctedindices,

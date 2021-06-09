@@ -12,8 +12,10 @@ import re,timeit,pickle,argparse,multiprocessing,os
 import matplotlib.ticker as mtick
 from os import path
 import hashlib
-import csv
+import csv,json
+# from v3_0_duplicate_map import dups as dillon_dups
 from v3_0_duplicate_map import dups as dillon_dups
+
 dillon_dups=dillon_dups[3]
 
 
@@ -183,7 +185,7 @@ def separatevpeccontributions(sndata,sncoords):
 	sndata=np.array(recfunctions.append_fields(sndata,'VPEC_BULK',vpecbulk))
 	return sndata
 
-def getseparation(sndata,hostlocs=True):
+def getpositions(sndata,hostlocs=True):
 	zcmb=sndata['zCMB']
 	rakey='HOST_RA' if hostlocs else 'RA'
 	snra=sndata['RA']*u.degree
@@ -197,9 +199,8 @@ def getseparation(sndata,hostlocs=True):
 	snpos[:,1]=np.cos(sndec)*np.cos(snra)
 	snpos[:,2]=np.sin(sndec)
 	snpos*=chi[:,np.newaxis]
-
 	separation=np.sqrt(((snpos[:,np.newaxis,:]-snpos[np.newaxis,:,:])**2).sum(axis=2))
 	angsep=np.empty((sndata.size,sndata.size))
 	for i in range(sndata.size):
 		angsep[i,:]=sncoords.separation(sncoords[i])
-	return sncoords,separation,angsep
+	return sncoords,snpos,separation,angsep
