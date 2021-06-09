@@ -44,6 +44,8 @@ parser.add_argument('--njobs', type=int,default=0,
 
 parser.add_argument('--optimizing',action='store_true',
                     help='Useful for debugging: don\'t run mcmc, instead just return mode of posterior')
+parser.add_argument('--simulateddata',nargs=2,type=str,default=None,
+					help='file with simulated data vectors and the index to use for this run')
 parser.add_argument('--nocorrections',action='store_true',
 					help='No 2M++ corrections')
 					
@@ -72,8 +74,12 @@ if args.nocorrections:
 	data_name+='_no2mm'
 data_name+=f'_{redshiftcut[0]:.2f}_{redshiftcut[1]:.2f}'.replace('.','')
 
-
-
+if args.simulateddata:
+	simfile=args.simulateddata[0]
+	simindex=int(args.simulateddata[1])
+	data_name+=f"_simulated_{simindex}"
+	with open(simfile,'rb') as file: 
+		simdata= pickle.load(file)[1]
 model_name=''
 if fixintrins:
 	model_name+='fixintrins_'
@@ -148,7 +154,12 @@ else:
 
 
 # In[8]:
-muresiduals=cosmo.distmod(sndata['zCMB']).value - sndata['MU']
+if args.simulateddata:
+	muresiduals=simdata['mu_hat'][simindex]
+	print('WARNING: SIMULATED DATA')
+	print('True values:',', '.join([f'{key} {simdata[key][simindex]:.3f}' for key in simdata.constrained_param_names() if simdata[key].ndim==1]))
+else:
+	muresiduals=cosmo.distmod(sndata['zCMB']).value - sndata['MU']
 # In[10]:
 
 
@@ -370,7 +381,9 @@ generated quantities{{
 {declare_pecvel_quantities}
 {define_pecvel_quantities}
 {define_mu_quantities}
-		vlin_hat=multi_normal_rng(pecvelmeanmarginal[tmppinds], pecvelcovmarginal[tmppinds,tmppinds]);
+		if (ntmppobs!=0){{
+			vlin_hat=multi_normal_rng(pecvelmeanmarginal[tmppinds], pecvelcovmarginal[tmppinds,tmppinds]);
+		}}
 		log_lik = multi_normal_lpdf( muresiduals|meanmuresids[sninds], covsigmamuresids[sninds,sninds] );
 		mu_hat = multi_normal_rng(meanmuresids[sninds], covsigmamuresids[sninds,sninds] );
 		if (nsnobs_pred !=0){{
@@ -393,44 +406,7 @@ generated quantities{{
 }}
 
 """
-# generated quantities {{
-#     // elementwise log likelihood
-#     real log_likelihood_mu[nsnobs];
-#     real log_likelihood_tmpp[ntmppobs];
-#     
-#     // posterior predictive
-#     real mu_hat[nsnobs];
-#     real tmpp_hat[ntmppobs];
-#     
-#     // out of sample prediction
-#     real mu_pred[nsnobs_pred];
-#     real tmpp_pred[ntmppobs_pred];
-#     real log_likelihood_mu_pred[nsnobs_pred];
-#     real log_likelihood_tmpp_pred[ntmppobs_pred];
-#     {{
-# 		{define_additional_model_quantities}
-# 		// posterior predictive
-# 		for (k in 1:nsnobs){{
-# 			log_likelihood_mu[k] = normal_lpdf(muresiduals[k] | offset+(dmudvpec .* peculiarvelocities)[sninds[k]], sigmamuresids[sninds[k]]);
-# 		}}
-# 		mu_hat = normal_rng(offset+(dmudvpec .* peculiarvelocities)[sninds], sigmamuresids[sninds]);
-# 	
-# 		for (k in 1:ntmppobs){{
-# 			log_likelihood_tmpp[k] = normal_lpdf(velcorrections[k]+bulkcorrections[k] | peculiarvelocities[tmppinds[k]],correctionstd);
-# 		}}
-# 		tmpp_hat = normal_rng(peculiarvelocities[tmppinds],correctionstd);
-#  
-# 		// out of sample prediction
-# 		mu_pred = normal_rng(offset+(dmudvpec .* peculiarvelocities)[sninds_pred], sigmamuresids[sninds_pred]);
-# 		for (k in 1:nsnobs_pred){{
-# 			log_likelihood_mu_pred[k] = normal_lpdf(mu_excluded[k]|offset+(dmudvpec .* peculiarvelocities)[sninds_pred[k]], sigmamuresids[sninds_pred[k]]);
-# 		}}
-# 		tmpp_pred = normal_rng(peculiarvelocities[tmppinds_pred],correctionstd);
-# 		for (k in 1:ntmppobs_pred){{
-# 			log_likelihood_tmpp_pred[k] = normal_lpdf(tmpp_excluded[k]|peculiarvelocities[tmppinds_pred[k]],correctionstd);
-# 		}}
-# 	}}
-# }}
+
 
 if path.exists(codefile):
 	with open(codefile,'r') as file: oldcode=file.read()
