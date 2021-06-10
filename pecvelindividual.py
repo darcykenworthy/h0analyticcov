@@ -220,6 +220,8 @@ define_pecvel_quantities+="""
 		
 		pecvelmeanmarginal=sumcovtransform_times_priorcov'* mdivide_left_tri_low(sumcovtransform,tmppmeasuredvel);
 		pecvelcovmarginal= sumcovtransform_times_tmppcov' *sumcovtransform_times_priorcov ;
+		//Symmetrise, try to make sure pos def
+		pecvelcovmarginal=(pecvelcovmarginal'+pecvelcovmarginal)/2+diag_matrix(rep_vector(1,N));
 	}
 	else{
 		//quantities purely for calculation, no relevance
@@ -242,6 +244,8 @@ define_pecvel_quantities+="""
 		pecvelcovmarginal[tmppinds,notmppinds]=  sumcovtransform_times_tmppcov' *sumcovtransform_times_transfermatrix ;
 		pecvelcovmarginal[notmppinds,tmppinds]= pecvelcovmarginal[tmppinds,notmppinds]';
 		pecvelcovmarginal[notmppinds,notmppinds]=cosmoprior[notmppinds,notmppinds]- crossprod(sumcovtransform_times_transfermatrix);
+		//Symmetrise, try to make sure pos def
+		pecvelcovmarginal=(pecvelcovmarginal'+pecvelcovmarginal)/2+diag_matrix(rep_vector(1,N));
 	}
 """
 
@@ -393,7 +397,7 @@ generated quantities{{
 	real log_lik_ex;
 	vector[nsnobs] log_lik_pointwise;
 	{{
-		vector[nsnobs] pointwisemustd;
+		vector[nsnobs] pointwisemuvar;
 		vector[nsnobs] pointwisemumean;
 {declare_mu_quantities}
 {declare_pecvel_quantities}
@@ -421,10 +425,10 @@ generated quantities{{
 			mu_pred= multi_normal_rng(meanpred, sigmamupred);
 			
 		}}
-		pointwisemustd=  1 ./ diagonal(inverse_spd(covsigmamuresids[sninds,sninds]));
-		pointwisemumean =  muresiduals -  pointwisemustd .* mdivide_left_spd(covsigmamuresids[sninds,sninds], muresiduals-meanmuresids[sninds]);
+		pointwisemuvar=  1 ./ diagonal(inverse_spd(covsigmamuresids[sninds,sninds]));
+		pointwisemumean =  muresiduals -  pointwisemuvar .* mdivide_left_spd(covsigmamuresids[sninds,sninds], muresiduals-meanmuresids[sninds]);
 		for (i in 1:nsnobs){{
-			log_lik_pointwise[i]=normal_lpdf( muresiduals[i] | pointwisemumean[i], pointwisemustd [i]);
+			log_lik_pointwise[i]=normal_lpdf( muresiduals[i] | pointwisemumean[i],sqrt(pointwisemuvar[i]));
 		}}
 	}}
 }}
