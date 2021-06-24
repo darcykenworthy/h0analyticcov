@@ -28,6 +28,8 @@ from utilfunctions import *
 parser = argparse.ArgumentParser(description='Calculate velocity covariance between supernovae from fitres file')
 parser.add_argument('fitres',type=str, 
                     help='File with supernova distances')
+parser.add_argument('--velocitycov',type=str,default=None,
+                    help='.npy file containing peculiar velocity covariance matrix')
 
 parser.add_argument('--redshiftcut',type=float,nargs=2,default=[0.01,10],
                     help='Minimum and maximum redshift values')
@@ -72,6 +74,11 @@ redshiftcut= args.redshiftcut
 fixintrins=not (args.intrins is None)
 intrins=args.intrins
 data_name=path.splitext(path.split(fitres)[-1])[0]
+if args.velocitycov:
+	data_name+=f'_{path.splitext(path.split(args.velocitycov)[-1])[0]}'
+	pecvelcovfile=args.velocitycov
+else:
+	pecvelcovfile='velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0])
 if args.nocorrections:
 	data_name+='_no2mm'
 data_name+=f'_{redshiftcut[0]:.2f}_{redshiftcut[1]:.2f}'.replace('.','')
@@ -171,7 +178,7 @@ else:
 dmudvpec=5/np.log(10)*((1+z)**2/(cosmo.efunc(z)*cosmo.H0*cosmo.luminosity_distance(z))).to(u.s/u.km).value
 velocityprefactor=np.outer(dmudvpec,dmudvpec)
 
-pecvelcov=np.load('velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))[cut,:][:,cut]
+pecvelcov=np.load(pecvelcovfile)[cut,:][:,cut]
 
 
 
