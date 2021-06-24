@@ -55,10 +55,10 @@ parser.add_argument('--correlatetmpp',action='store_true',
 					help='Do not assume 2M++ errors are uncorrelated')
 parser.add_argument('--fixcorrectionparams',action='store_true',
 					help='Fix 2M++ nuisance parameters to fiducial values')
-parser.add_argument('--fixveldispersion',action='store_true',
-					help='Fix nonlinear velocity dispersion to 250 km/s')
+parser.add_argument('--fixveldispersion',type=float,default=None,
+					help='Fix nonlinear velocity dispersion to given value (km/s)')
 parser.add_argument('--intrins',type=float,default=None,
-                    help='Fix intrinsic scatter to a given value')
+                    help='Fix intrinsic scatter to a given value (mag)')
 parser.add_argument('--flatprior',action='store_true',
                     help='Use flat priors on all parameters (default is Jeffreys prior)')
 parser.add_argument('--sampleprior', action='store_true', 
@@ -274,8 +274,8 @@ else:
 """
 
 if args.fixveldispersion:
-	define_additional_constants+="""
-    real<lower=10,upper=500> veldispersion_additional=200;
+	define_additional_constants+=f"""
+    real<lower=10,upper=500> veldispersion_additional={args.fixveldispersion};
 """
 else:
 	define_additional_params+="""real<lower=10,upper=500> veldispersion_additional;
