@@ -94,7 +94,7 @@ if args.correlatetmpp:
 	model_name+='correlatetmpp_'
 if fixintrins:
 	model_name+='fixintrins_'
-if args.fixveldispersion:
+if not (args.fixveldispersion is  None):
 	model_name+='fixveldispersion_'
 if args.fixcorrectionparams:
 	model_name+='fixedcorrections_'
@@ -185,7 +185,7 @@ pecvelcov=np.load(pecvelcovfile)[cut,:][:,cut]
 pecvelcov=checkposdef(pecvelcov)
 
 
-
+define_additional_priors=''
 define_additional_constants=''
 define_additional_params=''
 
@@ -273,12 +273,15 @@ else:
 	define_additional_params+="""real<lower=.01,upper=1> intrins;
 """
 
-if args.fixveldispersion:
-	define_additional_constants+=f"""
-    real<lower=10,upper=500> veldispersion_additional={args.fixveldispersion};
+if args.fixveldispersion is None:
+	define_additional_params+="""real<lower=10,upper=500> veldispersion_additional;
+"""
+	define_additional_priors+="""
+		veldispersion_additional ~ lognormal(log(250),.5);
 """
 else:
-	define_additional_params+="""real<lower=10,upper=500> veldispersion_additional;
+	define_additional_constants+=f"""
+    real veldispersion_additional={args.fixveldispersion};
 """
 if args.fixcorrectionparams:
 	define_additional_constants+="""real<lower=10,upper=1000> correctionstd=150;
@@ -287,13 +290,17 @@ else:
 
 	define_additional_params+="""real<lower=10,upper=1000> correctionstd;
 """
+	define_additional_priors+="""
+	//2m++ prior (based on N body simulations)
+	correctionstd ~ lognormal(log(150),.5);
+"""
 
 if args.flatprior:
 	prior_block="""
 """
 else:
 	
-	prior_block="""
+	prior_block=f"""
 	//SN priors
 	offset ~ normal(0,.5);
 	intrins ~ lognormal(log(0.1),.5);
@@ -302,16 +309,8 @@ else:
 	vextrescale ~ normal(1,vextfracerr);
 	betarescale ~ normal(1,betafracerr);
 
-	//2m++ prior (based on N body simulations)
-	correctionstd ~ lognormal(log(150),.5);
 	sigmarescale~lognormal(0,.5);
-	veldispersion_additional ~ lognormal(log(250),.5);
-	
-	// inverse improper priors on scale parameters
-	target+=-log(sigmarescale);
-	target+=-log(veldispersion_additional);
-	target+=-log(intrins);
-	target+=-log(correctionstd);
+{define_additional_priors}
 """
 	if args.correlatetmpp:
 		prior_block+="""tmppcorscale~lognormal(log(10),1);
