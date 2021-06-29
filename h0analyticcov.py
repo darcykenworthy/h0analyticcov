@@ -83,7 +83,7 @@ parser.add_argument('--nonlinear_scale',type=float,default=-1,
                     help='Splits the integral over k in two at this value in h/Mpc and saves them to output separately. Set to -1 to cancel')
 parser.add_argument('--chunksize',type=int,default=10000,
                     help='Number of covariance matrix elements to calculate in each vectorized operation. Setting this larger may improve performance, but increases memory footprint')
-parser.add_argument('--redshiftrange',type=float,default=[0,20],
+parser.add_argument('--redshiftrange',type=float,default=[0,20],nargs=2,
                     help='Minimum and maximum redshift')
 parser.add_argument('--cutdups',action='store_const',
                     const=True, default=False,
@@ -128,7 +128,6 @@ if (sndata['DEC']<-90).any():
 	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['HOST_RA']=202.306840
 	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['HOST_DEC']=11.275820
 
-
 	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['RA']=330.454458
 	sndata[np.where(sndata['CID']=='SNF20080909-030')[0][0]]['DEC']= 13.055306
 
@@ -138,11 +137,9 @@ if (sndata['DEC']<-90).any():
 	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['RA']=3.749292
 	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['DEC']=16.335000
 
-
 	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['HOST_RA']=3.750292
 	sndata[np.where(sndata['CID']=='SNF20071021-000')[0][0]]['HOST_DEC']=16.333242
 	print('Warning: Special Case fixes for KAIT SNe')
-
 
 #Initialize CLASS
 classparams=classylss.load_ini(inifile)
@@ -199,7 +196,7 @@ calculatelements[np.tril_indices(z.size,-1)]=False
 calculatelements[separation==0]=False
 print('Calculating velocity covariance matrix')
 if separatenonlinear:
-	integralterm=np.ones((2,z.size,z.size))*dummyval
+	integralterm=np.ones((z.size,z.size,2))*dummyval
 else:
 	integralterm=np.ones((z.size,z.size))*dummyval
 calculateindices=np.where(calculatelements)
@@ -234,10 +231,10 @@ for i in trange(numchunks):
 	if separatenonlinear:
 		integrand=series*pk_nl_dlog10k[:,np.newaxis]
 		elements=([(integrand[k<args.nonlinear_scale,:] ).sum(axis=0)*dlog10k/(2*np.pi**2),(integrand[k>=args.nonlinear_scale,:] ).sum(axis=0)*dlog10k/(2*np.pi**2)])
-		integralterm[np.tile(0,chunkindices[0].size),chunkindices[0],chunkindices[1]]=elements[0]
-		integralterm[np.tile(0,chunkindices[0].size),chunkindices[1],chunkindices[0]]=elements[0]
-		integralterm[np.tile(1,chunkindices[0].size),chunkindices[0],chunkindices[1]]=elements[1]
-		integralterm[np.tile(1,chunkindices[0].size),chunkindices[1],chunkindices[0]]=elements[1]
+		integralterm[chunkindices[0],chunkindices[1],np.tile(0,chunkindices[0].size)]=elements[0]
+		integralterm[chunkindices[1],chunkindices[0],np.tile(0,chunkindices[0].size)]=elements[0]
+		integralterm[chunkindices[0],chunkindices[1],np.tile(1,chunkindices[0].size)]=elements[1]
+		integralterm[chunkindices[1],chunkindices[0],np.tile(1,chunkindices[0].size)]=elements[1]
 	else:
 		elements=(series*pk_nl_dlog10k[:,np.newaxis]).sum(axis=0)*dlog10k/(2*np.pi**2)
 		integralterm[chunkindices]=elements
@@ -250,7 +247,7 @@ distanceprefactor=D*f * (1+z)/ D_L * 5 /np.log(10)
 #Convert dDdtau from dimensionless to km/s
 velocityprefactor=dDdtau*constants.c.to(units.km/units.s).value
 if separatenonlinear:
-	velocitycovariance=np.outer(velocityprefactor,velocityprefactor)[np.newaxis,:,:]*integralterm
+	velocitycovariance=np.outer(velocityprefactor,velocityprefactor)[:,:,np.newaxis]*integralterm
 else:
 	velocitycovariance=np.outer(velocityprefactor,velocityprefactor)*integralterm
 print(f'Saving velocity covariance to {velcovoutput} and names of SNe in same order to {namelistoutput}')

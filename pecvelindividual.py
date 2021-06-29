@@ -51,6 +51,8 @@ parser.add_argument('--simulateddata',nargs=2,type=str,default=None,
 parser.add_argument('--nocorrections',action='store_true',
 					help='No 2M++ corrections')
 					
+parser.add_argument('--separatenonlinear',action='store_true',
+					help='Use description of nonlinear scaling from provided peculiar velocity covariance')
 parser.add_argument('--correlatetmpp',action='store_true',
 					help='Do not assume 2M++ errors are uncorrelated')
 parser.add_argument('--fixcorrectionparams',action='store_true',
@@ -90,6 +92,8 @@ if args.simulateddata:
 	with open(simfile,'rb') as file: 
 		simdata= pickle.load(file)[1]
 model_name=''
+if args.separatenonlinear:
+	model_name+='separatenonlinear_'
 if args.correlatetmpp:
 	model_name+='correlatetmpp_'
 if fixintrins:
@@ -178,10 +182,17 @@ else:
 dmudvpec=5/np.log(10)*((1+z)**2/(cosmo.efunc(z)*cosmo.H0*cosmo.luminosity_distance(z))).to(u.s/u.km).value
 velocityprefactor=np.outer(dmudvpec,dmudvpec)
 
-pecvelcov=np.load(pecvelcovfile)[cut,:][:,cut]
-
-
-
+pecvelcov=np.load(pecvelcovfile)
+if pecvelcov.ndim==3:
+	if args.separatenonlinear:
+		pecvelcov,nonlinear=pecvelcov[cut,:,:][:,cut,:].T
+		nonlinear=checkposdef(nonlinear)
+	else:
+		pecvelcov=pecvelcov.sum(axis=-1)[cut,:][:,cut]
+else:
+	if args.separatenonlinear:
+		raise ValueError("No separate nonlinear covariance available")
+	pecvelcov=pecvelcov[cut,:][:,cut]
 pecvelcov=checkposdef(pecvelcov)
 
 
@@ -194,19 +205,50 @@ declare_pecvel_quantities="""
 	matrix[N,N] pecvelcovmarginal;
 	vector[N] pecvelmeanmarginal;
 """
+define_pecvel_quantities="""
+	matrix[N,N] cosmoprior = square(sigmarescale)*pecvelcov;
+"""
+
+if args.separatenonlinear:
+	define_additional_data="""
+	matrix[N,N] nonlinear;
+"""
+	define_pecvel_quantities+="""
+	matrix[N,N] nonlinearfinal = square(nlrescale)*nonlinear;
+"""
+	define_additional_params+="""
+	real<lower=.01,upper=10> nlrescale;
+"""
+	define_additional_priors+="""
+	nlrescale~lognormal(0,.5);
+"""
+	if not args.fixveldispersion is None:
+		raise ValueError("Veldispersion specified with separate nonlinear matrix")
+else:
+	if args.fixveldispersion is None:
+		define_additional_params+="""real<lower=10,upper=500> veldispersion_additional;
+"""
+		define_additional_priors+="""
+		veldispersion_additional ~ lognormal(log(250),.5);
+"""
+	else:
+		define_additional_constants+=f"""
+		real veldispersion_additional={args.fixveldispersion};
+	"""
+	define_pecvel_quantities+="""
+	matrix[N,N] nonlinearfinal = diag_matrix(rep_vector(square(veldispersion_additional),N));
+"""
 
 if args.correlatetmpp:
 	define_additional_params+="""
 	real<lower=0,upper=200> tmppcorscale;
 """
-	define_pecvel_quantities="""
-	matrix[N,N] cosmoprior = square(sigmarescale)*pecvelcov;
+	define_pecvel_quantities+="""
 	matrix[ntmppobs,ntmppobs] tmppcov= cov_exp_quad( positions[tmppinds],correctionstd, tmppcorscale);
 
 """
 else: 
-	define_pecvel_quantities="""
-	matrix[N,N] cosmoprior = square(sigmarescale)*pecvelcov;
+	define_pecvel_quantities+="""
 	matrix[ntmppobs,ntmppobs] tmppcov= diag_matrix(rep_vector(square(correctionstd),ntmppobs));
 """
 
@@ -254,6 +296,7 @@ define_pecvel_quantities+="""
 		//Symmetrise, try to make sure pos def
 		pecvelcovmarginal=(pecvelcovmarginal'+pecvelcovmarginal)/2+diag_matrix(rep_vector(1,N));
 	}
+	pecvelcovmarginal+=nonlinear;
 """
 
 declare_mu_quantities="""
@@ -263,7 +306,7 @@ declare_mu_quantities="""
 """
 define_mu_quantities="""
 	meanmuresids=offset+(dmudvpec .* pecvelmeanmarginal);
-	muresidsvar= (square(veldispersion_additional * dmudvpec) + biasscale .* (square(intrins)+square(muerr)));
+	muresidsvar=  biasscale .* (square(intrins)+square(muerr));
 	covsigmamuresids=quad_form_diag(pecvelcovmarginal,dmudvpec)+diag_matrix(muresidsvar);
 """
 if fixintrins:
@@ -273,16 +316,6 @@ else:
 	define_additional_params+="""real<lower=.01,upper=1> intrins;
 """
 
-if args.fixveldispersion is None:
-	define_additional_params+="""real<lower=10,upper=500> veldispersion_additional;
-"""
-	define_additional_priors+="""
-		veldispersion_additional ~ lognormal(log(250),.5);
-"""
-else:
-	define_additional_constants+=f"""
-    real veldispersion_additional={args.fixveldispersion};
-"""
 if args.fixcorrectionparams:
 	define_additional_constants+="""real<lower=10,upper=1000> correctionstd=150;
 """
@@ -346,6 +379,7 @@ data {{
     int  tmppinds[ntmppobs]; //indices of SNe with local 2m++ corrections
     vector[ntmppobs] velcorrections;
     vector[ntmppobs] bulkcorrections;    
+{define_additional_data}
 }}
 
 transformed data{{
@@ -481,6 +515,8 @@ standat = {'N': sndata.size,
                'tmppinds_pred':np.array([],dtype=int),
                'tmpp_excluded':np.array([],dtype=float),
               }
+if args.separatenonlinear:
+	standat['nonlinear']=nonlinear
 if fixintrins:
 	standat['intrins']=intrins
 
