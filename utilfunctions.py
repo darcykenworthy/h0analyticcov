@@ -14,9 +14,8 @@ from os import path
 import hashlib
 import csv,json
 # from v3_0_duplicate_map import dups as dillon_dups
-from v3_0_duplicate_map import dups as dillon_dups
+from duplicates_v3_06_renamed import duplicate_dictionary as dillon_dups
 
-dillon_dups=dillon_dups[3]
 
 
 cosmo=Planck15
@@ -117,26 +116,27 @@ def renameDups(sndataFull):
 	uniqueids={}
 	coveredcids=set()
 	cids=np.unique(sndataFull['CID'])
-	for cid in (cids):
-		if cid in coveredcids: continue
-		#if cid == '10805': import pdb;pdb.set_trace()
-		coveredcids.add(cid)
-		name,aliases=cid,{cid}
-		while True:
-			for edge in dillon_dups.items():
-				if  (edge[0] in cids) and (edge[1] in cids) and (edge[0] in aliases)^(edge[1] in aliases):
-					aliases.add(edge[0])
-					aliases.add(edge[1])
-					coveredcids.add(edge[0])
-					coveredcids.add(edge[1])
-					break
-			else:
-				break
-		uniqueids[name]=aliases
-
-	for unique in uniqueids:
-		for alias in uniqueids[unique]:
-			sndataFull['CID'][sndataFull['CID']==alias]=unique
+# 	for cid in (cids):
+# 		if cid in coveredcids: continue
+# 		#if cid == '10805': import pdb;pdb.set_trace()
+# 		coveredcids.add(cid)
+# 		name,aliases=cid,{cid}
+# 		while True:
+# 			for edge in dillon_dups.items():
+# 				if  (edge[0] in cids) and (edge[1] in cids) and (edge[0] in aliases)^(edge[1] in aliases):
+# 					aliases.add(edge[0])
+# 					aliases.add(edge[1])
+# 					coveredcids.add(edge[0])
+# 					coveredcids.add(edge[1])
+# 					break
+# 			else:
+# 				break
+# 		uniqueids[name]=aliases
+# 	for unique in uniqueids:
+# 		for alias in uniqueids[unique]:
+# 			sndataFull['CID'][sndataFull['CID']==alias]=unique
+	for alias in dillon_dups:
+		sndataFull['CID'][sndataFull['CID']==alias]=dillon_dups[alias]
 	return sndataFull
 	
 def cutdups(sndataFull,reweight=False):

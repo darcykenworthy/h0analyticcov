@@ -50,7 +50,10 @@ parser.add_argument('--simulateddata',nargs=2,type=str,default=None,
 					help='file with simulated data vectors and the index to use for this run')
 parser.add_argument('--nocorrections',action='store_true',
 					help='No 2M++ corrections')
-					
+
+parser.add_argument('--tdist',action='store_true',
+					help='Use multidimensional t-distributions for SN Ia residuals rather than normal')
+
 parser.add_argument('--separatenonlinear',action='store_true',
 					help='Use description of nonlinear scaling from provided peculiar velocity covariance')
 parser.add_argument('--correlatetmpp',action='store_true',
@@ -92,6 +95,8 @@ if args.simulateddata:
 	with open(simfile,'rb') as file: 
 		simdata= pickle.load(file)[1]
 model_name=''
+if args.tdist:
+	model_name+='tdist_'
 if args.separatenonlinear:
 	model_name+='separatenonlinear_'
 if args.correlatetmpp:
@@ -199,7 +204,7 @@ pecvelcov=checkposdef(pecvelcov)
 define_additional_priors=''
 define_additional_constants=''
 define_additional_params=''
-
+define_additional_data=''
 # In[13]:
 declare_pecvel_quantities="""
 	matrix[N,N] pecvelcovmarginal;
@@ -210,7 +215,7 @@ define_pecvel_quantities="""
 """
 
 if args.separatenonlinear:
-	define_additional_data="""
+	define_additional_data+="""
 	matrix[N,N] nonlinear;
 """
 	define_pecvel_quantities+="""
@@ -296,7 +301,7 @@ define_pecvel_quantities+="""
 		//Symmetrise, try to make sure pos def
 		pecvelcovmarginal=(pecvelcovmarginal'+pecvelcovmarginal)/2+diag_matrix(rep_vector(1,N));
 	}
-	pecvelcovmarginal+=nonlinear;
+	pecvelcovmarginal+=nonlinearfinal;
 """
 
 declare_mu_quantities="""
@@ -309,6 +314,42 @@ define_mu_quantities="""
 	muresidsvar=  biasscale .* (square(intrins)+square(muerr));
 	covsigmamuresids=quad_form_diag(pecvelcovmarginal,dmudvpec)+diag_matrix(muresidsvar);
 """
+
+if args.tdist:
+	extradistparam='nu,'
+	distname='multi_student_t'
+	varprefactor='nu/(nu-2)*'
+	define_additional_params+="""
+	real <lower=2,upper=20> nu;
+"""
+	define_additional_priors+="""
+	nu ~ gamma(4,.5);
+"""
+	define_log_lik_pointwise="""
+		inversesigma= inverse_spd(covsigmamuresids[sninds,sninds]);
+		pointwisedegree= nu + nsnobs-1;
+		residualsfinal=muresiduals-meanmuresids[sninds];
+		invsig_residuals=mdivide_left_spd(covsigmamuresids[sninds,sninds],residualsfinal );
+THIS DON'T WORK YET
+		for (i in 1:nsnobs){{
+			pointwisemumean =  muresiduals -  1/inversesigma[i,i] *invsig_residuals[i] ;
+			collessthisindex=append_col( head( col(inversesigma,i) , i-1), tail( col(inversesigma,i) , nsnobs- (i)))
+			inversesigma - collessthisindex*collessthisindex' / inversesigma[i,i]
+			log_lik_pointwise[i]=normal_lpdf( muresiduals[i] | pointwisemumean[i],sqrt(pointwisemuvar[i]));
+		}}
+"""
+else:
+	extradistparam=''
+	distname='multi_normal'
+	varprefactor=''
+	define_log_lik_pointwise="""
+		pointwisemuvar=  1 ./ diagonal(inverse_spd(covsigmamuresids[sninds,sninds]));
+		pointwisemumean =  muresiduals -  pointwisemuvar .* mdivide_left_spd(covsigmamuresids[sninds,sninds], muresiduals-meanmuresids[sninds]);
+		for (i in 1:nsnobs){{
+			log_lik_pointwise[i]=normal_lpdf( muresiduals[i] | pointwisemumean[i],sqrt(pointwisemuvar[i]));
+		}}
+"""
+
 if fixintrins:
 	define_additional_constants+=f"""real<lower=.01,upper=1> intrins={intrins};
 """
@@ -352,9 +393,9 @@ if args.sampleprior:
 	calculate_residuals=""
 else:
 
-	calculate_residuals="""
+	calculate_residuals=f"""
 	//SN constraints
-	muresiduals ~ multi_normal(meanmuresids[sninds],covsigmamuresids[sninds,sninds] );
+	muresiduals ~ {distname}({extradistparam}meanmuresids[sninds],{varprefactor}covsigmamuresids[sninds,sninds] );
 """
 
 model_code=f"""
@@ -443,11 +484,8 @@ generated quantities{{
 {declare_pecvel_quantities}
 {define_pecvel_quantities}
 {define_mu_quantities}
-		if (ntmppobs!=0){{
-			vlin_hat=multi_normal_rng(pecvelmeanmarginal[tmppinds], pecvelcovmarginal[tmppinds,tmppinds]);
-		}}
-		log_lik = multi_normal_lpdf( muresiduals|meanmuresids[sninds], covsigmamuresids[sninds,sninds] );
-		mu_hat = multi_normal_rng(meanmuresids[sninds], covsigmamuresids[sninds,sninds] );
+		log_lik = {distname}_lpdf( muresiduals|{extradistparam}meanmuresids[sninds],{varprefactor} covsigmamuresids[sninds,sninds] );
+		mu_hat = {distname}_rng({extradistparam}meanmuresids[sninds],{varprefactor} covsigmamuresids[sninds,sninds] );
 		if (nsnobs_pred !=0){{
 			matrix[nsnobs,nsnobs] chol_sigma ;
 			vector[nsnobs] invchol_muobs;
@@ -465,12 +503,7 @@ generated quantities{{
 			mu_pred= multi_normal_rng(meanpred, sigmamupred);
 			
 		}}
-		pointwisemuvar=  1 ./ diagonal(inverse_spd(covsigmamuresids[sninds,sninds]));
-		pointwisemumean =  muresiduals -  pointwisemuvar .* mdivide_left_spd(covsigmamuresids[sninds,sninds], muresiduals-meanmuresids[sninds]);
-		for (i in 1:nsnobs){{
-			log_lik_pointwise[i]=normal_lpdf( muresiduals[i] | pointwisemumean[i],sqrt(pointwisemuvar[i]));
-		}}
-	}}
+{define_log_lik_pointwise}	}}
 }}
 
 """
@@ -495,8 +528,8 @@ standat = {'N': sndata.size,
                'biasscale':sndata['biasScale_muCOV'],
                 'systematics': np.zeros((sndata.size,sndata.size)),
                 'zCMB':sndata['zCMB'],
-               'dmudvpec':dmudvpec,
-               'pecvelcov':pecvelcov,
+                'dmudvpec':dmudvpec,
+                'pecvelcov':pecvelcov,
            		'positions':snpos,
            		
                'ntmppobs':  len(correctedindices),
