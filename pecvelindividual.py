@@ -397,7 +397,8 @@ else:
 """
 	define_additional_priors+="""
 	//2m++ prior (based on N body simulations)
-	correctionstd ~ lognormal(log(150),.5);
+	correctionstd ~ gamma(75,2);
+	//correctionstd ~ lognormal(log(150),.5);
 """
 
 if args.flatprior:
