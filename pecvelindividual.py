@@ -30,6 +30,8 @@ parser.add_argument('fitres',type=str,
                     help='File with supernova distances')
 parser.add_argument('--velocitycov',type=str,default=None,
                     help='.npy file containing peculiar velocity covariance matrix')
+parser.add_argument('--systematics',type=str,default=None,nargs=2,
+					help="File identifying CID's and file with systematic covariance matrix")
 
 parser.add_argument('--redshiftcut',type=float,nargs=2,default=[0.01,10],
                     help='Minimum and maximum redshift values')
@@ -53,7 +55,6 @@ parser.add_argument('--nocorrections',action='store_true',
 
 parser.add_argument('--tdist',action='store_true',
 					help='Use multidimensional t-distributions for SN Ia residuals rather than normal')
-
 parser.add_argument('--separatenonlinear',action='store_true',
 					help='Use description of nonlinear scaling from provided peculiar velocity covariance')
 parser.add_argument('--correlatetmpp',action='store_true',
@@ -79,6 +80,8 @@ redshiftcut= args.redshiftcut
 fixintrins=not (args.intrins is None)
 intrins=args.intrins
 data_name=path.splitext(path.split(fitres)[-1])[0]
+usesystematics=not (args.systematics is None)
+
 if args.velocitycov:
 	data_name+=f'_{path.splitext(path.split(args.velocitycov)[-1])[0]}'
 	pecvelcovfile=args.velocitycov
@@ -86,7 +89,10 @@ else:
 	pecvelcovfile='velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0])
 if args.nocorrections:
 	data_name+='_no2mm'
+if usesystematics:
+	data_name+='_systematics'
 data_name+=f'_{redshiftcut[0]:.2f}_{redshiftcut[1]:.2f}'.replace('.','')
+
 
 if args.simulateddata:
 	simfile=args.simulateddata[0]
@@ -126,9 +132,42 @@ if path.exists(pickleoutput) and not args.clobber and not args.optimizing:
 # In[3]:
 
     
-sndataFull=readFitres(fitres)
-sndataFull=renameDups(sndataFull)
-sndata=cutdups(sndataFull,reweight=True)
+sndata=readFitres(fitres)
+
+
+if usesystematics:
+	passedsystematics=np.genfromtxt(args.systematics[0],dtype=[int,'U40',float,float,float],names=True)
+	covmatfile=np.genfromtxt(args.systematics[1])
+	covmatsize,covmat=int(covmatfile[0]),covmatfile[1:]
+	covmat=covmat.reshape((covmatsize,covmatsize))
+	
+	listsbysurvcid=[[f"{x['IDSURVEY']:.0f}_{x['CID']}" for x in y] for y in [sndata,passedsystematics]]
+	cut = np.array([x in listsbysurvcid[1] for x in listsbysurvcid[0]])
+	print(f"SNe missing from systematics: {', '.join(sndata['CID'][~cut])}")
+	sndata=sndata#[cut]
+	indexmapping=[listsbysurvcid[1].index(x) for x in (listsbysurvcid[0]) if x in listsbysurvcid[1]]
+	systematics=covmat[indexmapping,:][:,indexmapping]
+else:
+	cut=np.ones(sndata.size,dtype=bool)
+	systematics=np.zeros((sndata.size,sndata.size))
+	
+pecvelcov=np.load(pecvelcovfile)
+if pecvelcov.ndim==3:
+	if args.separatenonlinear:
+		pecvelcov,nonlinear=pecvelcov[cut,:,:][:,cut,:].T
+		nonlinear=checkposdef(nonlinear)
+	else:
+		pecvelcov=pecvelcov.sum(axis=-1)[cut,:][:,cut]
+else:
+	if args.separatenonlinear:
+		raise ValueError("No separate nonlinear covariance available")
+	pecvelcov=pecvelcov[cut,:][:,cut]
+pecvelcov=checkposdef(pecvelcov)
+
+sndata=sndata[cut].copy()
+sndata=renameDups(sndata)
+#,dupscut=cutdups(sndataFull,reweight=False,returninds=True)
+#systematics=systematics[dupscut,:][:,dupscut]
 if (sndata['DEC']<-90).any():
 	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['RA']=202.303420
 	sndata[np.where(sndata['CID']=='SNF20080514-002')[0][0]]['DEC']=11.272390
@@ -154,11 +193,18 @@ if (sndata['DEC']<-90).any():
 z=sndata['zCMB']
 
 cut= (z>redshiftcut[0])&(z<redshiftcut[1])
-print(f'{cut.sum()} SNe in redshift range {redshiftcut}')
 sndata=sndata[cut].copy()
+systematics=systematics[cut,:][:,cut]
+pecvelcov=pecvelcov[cut,:][:,cut]
+if args.separatenonlinear:
+	nonlinear=nonlinear[cut,:][:,cut]
+#cut=cut&redshiftcut
+print(f'{cut.sum()} SNe in redshift range {redshiftcut}')
 z=sndata['zCMB']
 sncoords,snpos,sep,angsep=getpositions(sndata,hostlocs=False)
 sndata=separatevpeccontributions(sndata,sncoords)
+
+dupsmatrix=(sndata['CID'][np.newaxis,:]==sndata['CID'][:,np.newaxis])*1.
 
 try:
     ncpus = sum([int(x) for x in os.environ["SLURM_JOB_CPUS_PER_NODE"].split(',')])
@@ -183,24 +229,11 @@ else:
 # In[10]:
 
 
-
 dmudvpec=5/np.log(10)*((1+z)**2/(cosmo.efunc(z)*cosmo.H0*cosmo.luminosity_distance(z))).to(u.s/u.km).value
 velocityprefactor=np.outer(dmudvpec,dmudvpec)
 
-pecvelcov=np.load(pecvelcovfile)
-if pecvelcov.ndim==3:
-	if args.separatenonlinear:
-		pecvelcov,nonlinear=pecvelcov[cut,:,:][:,cut,:].T
-		nonlinear=checkposdef(nonlinear)
-	else:
-		pecvelcov=pecvelcov.sum(axis=-1)[cut,:][:,cut]
-else:
-	if args.separatenonlinear:
-		raise ValueError("No separate nonlinear covariance available")
-	pecvelcov=pecvelcov[cut,:][:,cut]
-pecvelcov=checkposdef(pecvelcov)
-
-
+	
+	
 define_additional_priors=''
 define_additional_constants=''
 define_additional_params=''
@@ -241,7 +274,7 @@ else:
 		real veldispersion_additional={args.fixveldispersion};
 	"""
 	define_pecvel_quantities+="""
-	matrix[N,N] nonlinearfinal = diag_matrix(rep_vector(square(veldispersion_additional),N));
+	matrix[N,N] nonlinearfinal =square(veldispersion_additional)*dupsmatrix;// diag_matrix(rep_vector(square(veldispersion_additional),N));
 """
 
 if args.correlatetmpp:
@@ -306,13 +339,11 @@ define_pecvel_quantities+="""
 
 declare_mu_quantities="""
 	vector[N] meanmuresids;
-	vector[N] muresidsvar ;
 	matrix[N,N] covsigmamuresids;
 """
 define_mu_quantities="""
 	meanmuresids=offset+(dmudvpec .* pecvelmeanmarginal);
-	muresidsvar=  biasscale .* (square(intrins)+square(muerr));
-	covsigmamuresids=quad_form_diag(pecvelcovmarginal,dmudvpec)+diag_matrix(muresidsvar);
+	covsigmamuresids=quad_form_diag(pecvelcovmarginal,dmudvpec)+square(intrins)*dupsmatrixscaled+muvarscaled +systematics;
 """
 
 if args.tdist:
@@ -407,7 +438,8 @@ data {{
     vector[N] dmudvpec;
     matrix[N,N] pecvelcov;
 	vector[3] positions[N];
-	
+	matrix[N,N] systematics;
+	matrix[N,N] dupsmatrix;
 	int<lower=0> nsnobs;
 	int sninds[nsnobs];
     vector[nsnobs] muresiduals;
@@ -428,6 +460,8 @@ transformed data{{
     cov_matrix[N] identity=diag_matrix(rep_vector(1.0,N));
 	real vextfracerr= 23./159;
 	real betafracerr= 0.021/0.431; 
+	matrix[N,N] dupsmatrixscaled=quad_form_diag(dupsmatrix,sqrt(biasscale));
+	matrix[N,N] muvarscaled=  diag_matrix(biasscale .* (square(muerr)));
 
     int notmppinds[N-ntmppobs];
 {define_additional_constants}
@@ -526,12 +560,12 @@ usesn=np.arange(sndata.size)
 standat = {'N': sndata.size,
                'muerr': sndata['MUERR_RAW'],
                'biasscale':sndata['biasScale_muCOV'],
-                'systematics': np.zeros((sndata.size,sndata.size)),
+                'systematics': systematics,
                 'zCMB':sndata['zCMB'],
                 'dmudvpec':dmudvpec,
                 'pecvelcov':pecvelcov,
            		'positions':snpos,
-           		
+           		'dupsmatrix':dupsmatrix,
                'ntmppobs':  len(correctedindices),
                'tmppinds': 1+correctedindices,
                'velcorrections': sndata['VPEC_LOCAL'][correctedindices],

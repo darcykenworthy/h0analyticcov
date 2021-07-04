@@ -73,7 +73,7 @@ parser.add_argument('classfile',type=str,
                     help='CLASS ini file')
 parser.add_argument('--zkey',default='zCMB',
                     help='Name of the redshift column in fitres')
-parser.add_argument('--outputstem',default=False,
+parser.add_argument('--outputdir',default='.',type=str,
                     help='Add this to the output file name')
 parser.add_argument('--sigrsd',type=float,default=14,
                     help='Redshift space distortion scale in Mpc/h(default is 14, 0 deactivates redshift space distortions)')
@@ -105,8 +105,9 @@ minred,maxred=args.redshiftrange
 dummyval=np.nan
 chunksize=args.chunksize
 filenameonly=lambda x: path.splitext(path.split(x)[-1])[0]
+outputdir=args.outputdir
 outputstem='-'.join([filenameonly(fitresfile),filenameonly(inifile)])+('-separate' if separatenonlinear else '')
-if args.outputstem: outputstem+='-'+args.outputstem
+#if args.outputstem: outputstem+='-'+args.outputstem
 ##########################################################################################    
 
 sndata=readFitres(fitresfile)#sndata=readFitres('../../voidtest/SALT2mu_wcsphst2.fitres')
@@ -241,8 +242,8 @@ for i in trange(numchunks):
 		integralterm.T[chunkindices]=elements
 integralterm[separation==0]=1./3*(pk_nl_dlog10k).sum(axis=0)*dlog10k/(2*np.pi**2)	
 
-velcovoutput='velocitycovariance-{}.npy'.format(outputstem)
-namelistoutput='snnames-{}.npy'.format(outputstem)
+velcovoutput=path.join(outputdir,'velocitycovariance-{}.npy'.format(outputstem))
+namelistoutput=path.join(outputdir,'snnames-{}.npy'.format(outputstem))
 distanceprefactor=D*f * (1+z)/ D_L * 5 /np.log(10)
 #Convert dDdtau from dimensionless to km/s
 velocityprefactor=dDdtau*constants.c.to(units.km/units.s).value

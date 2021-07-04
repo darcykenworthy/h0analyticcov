@@ -139,7 +139,7 @@ def renameDups(sndataFull):
 		sndataFull['CID'][sndataFull['CID']==alias]=dillon_dups[alias]
 	return sndataFull
 	
-def cutdups(sndataFull,reweight=False):
+def cutdups(sndataFull,reweight=False,returninds=False):
 	accum=[]
 	result=[]
 	finalInds=[]
@@ -158,7 +158,10 @@ def cutdups(sndataFull,reweight=False):
 		if len(inds)>1 and reweight:
 			sndataFull['MU'][inds[0]],sndataFull['MUERR_RAW'][inds[0]],chisq,resids=weightedMean(sndataFull['MU'],sndataFull['MUERR_RAW']**2,sndataFull['CID']==name,returnpulls=True)
 			results+=[(name,chisq, (sndataFull['CID']==name).sum(),sndataFull[sndataFull['CID']==name]['IDSURVEY'],resids)]
-	return sndataFull[finalInds].copy()#,results
+	if returninds:
+		return sndataFull[finalInds].copy(),finalInds
+	else:
+		return sndataFull[finalInds].copy()#,results
 	
 	
 def checkposdef(matrix,condition=1e-10):

@@ -35,13 +35,15 @@ parser.add_argument('extractpickle',type=str,
                     help='File with MCMC chain')
 parser.add_argument('fitres',type=str, 
                     help='File with SNe')
+parser.add_argument('--velocitycov',type=str,default=None,
+                    help='.npy file containing peculiar velocity covariance matrix')
 parser.add_argument('--destoutput',type=str,default=None, 
                     help='Path to write pickle with bias and covariance')
 parser.add_argument('--nsamples',type=int,default=1000, 
                     help='Number of samples to draw from posterior')
 
 args = parser.parse_args()
-fitres=args.fitres
+fitres=args.fitres	
 output=args.destoutput if not  args.destoutput is None else path.join(path.dirname(args.extractpickle), path.basename(args.extractpickle).replace('extract_','posteriorbiascov_') )
 nsamples=args.nsamples
 sndatadups=utilfunctions.readFitres(fitres)
@@ -78,7 +80,7 @@ if (sndata['DEC']<-90).any():
 assert(sndata['DEC']>-90).all()
 
 
-sncoords,separation,angsep=utilfunctions.getseparation(sndata,hostlocs=False)
+sncoords,snpos,separation,angsep=utilfunctions.getpositions(sndata,hostlocs=False)
 sndata=utilfunctions.separatevpeccontributions(sndata,sncoords)
 
 
@@ -92,7 +94,7 @@ hascorrection=z<zmin
 
 z=sndata['zCMB']
 dmudvpec=5/np.log(10)*((1+z)**2/(cosmo.efunc(z)*cosmo.H0*cosmo.luminosity_distance(z))).to(u.s/u.km).value
-pecvelcov=np.load('velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))
+pecvelcov=np.load(args.velocitycov if args.velocitycov else 'velocitycovariance-{}-darksky_class.npy'.format(path.splitext(path.split(fitres)[-1])[0]))
 pecvelcov=utilfunctions.checkposdef(pecvelcov)
 
 
