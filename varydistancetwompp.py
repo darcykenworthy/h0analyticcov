@@ -125,13 +125,20 @@ functions {
 
 data {
     int nintdist;
+    //Observed CMB frame redshift
     real zobs;
+    //Errors in CMB frame redshift
     real zerr;
+    //Uncertainty in nonlinear peculiar velocity
     real vpecnonlindisp;
+    
+    //Quantities for interpolation of 2M++ grid
     real losdistancezero;
     real losdistancedelta;
     real losvelocities[nintdist];
     real losdensities[nintdist];
+    
+    //Cosmological params
     real c;
     real q;
     real j;
@@ -145,7 +152,7 @@ transformed parameters{
 	real distdimensionless= latdistance*100/c;
     real zpecvel = interpolateLinear(losvelocities,1+ (latdistance-losdistancezero)/losdistancedelta)/c;
 	real zcosm =   distdimensionless*(1+ ( q + 1) *distdimensionless / 2 + ( j + 2*q + 1) *square(distdimensionless )/6   ) ;
-    real densitycontrast = interpolateLinear(losdensities,1+ (latdistance-losdistancezero)/losdistancedelta)/c;
+    real densitycontrast = interpolateLinear(losdensities,1+ (latdistance-losdistancezero)/losdistancedelta);
 }
 model{
     if (zerr!=0){
