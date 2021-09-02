@@ -139,22 +139,15 @@ data {
 
 parameters{
     real<lower=losdistancezero,upper=losdistancezero+losdistancedelta*nintdist> latdistance;
-    real<lower=-10,upper=10> z;
 }
 transformed parameters{
-	real distdimensionless= latdistance*100/c;
+    real distdimensionless= latdistance*100/c;
     real zpecvel = interpolateLinear(losvelocities,1+ (latdistance-losdistancezero)/losdistancedelta)/c;
 	real zcosm =   distdimensionless*(1+ ( q + 1) *distdimensionless / 2 + ( j + 2*q + 1) *square(distdimensionless )/6   ) ;
-    real densitycontrast = interpolateLinear(losdensities,1+ (latdistance-losdistancezero)/losdistancedelta)/c;
+    real densitycontrast = interpolateLinear(losdensities,1+ (latdistance-losdistancezero)/losdistancedelta);
 }
 model{
-    if (zerr!=0){
-    	z~ normal(zobs,zerr);
-     	zpecvel ~ normal( (1+z)/(1+zcosm) -1 ,vpecnonlindisp/c);
-   }
-   else{
-     	zpecvel ~ normal( (1+zobs)/(1+zcosm) -1 ,vpecnonlindisp/c);
-   }
+    zpecvel ~ normal( (1+z)/(1+zcosm) -1 , sqrt( square(vpecnonlindisp/c)+square(zerr/(1+zcosm)));
     target+=log(1+densitycontrast);
 }
 """
