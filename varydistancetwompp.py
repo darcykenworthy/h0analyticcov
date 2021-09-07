@@ -12,21 +12,13 @@ from astropy import constants,units as u
 from scipy import stats
 from utilfunctions import *
 from tqdm import tqdm
-import pystan
+import stan
 import argparse
 import csv
 from os import path
 import logging
 import io
 import pickle
-# silence logger, there are better ways to do this
-# see PyStan docs
-logging.getLogger("pystan").propagate=False
-stream=io.StringIO('')
-handler=logging.StreamHandler(stream)
-handler.setLevel('WARNING')
-logging.getLogger("pystan").handlers=[]
-logging.getLogger("pystan").addHandler(handler )
 
 def wrapinterp(interp):
 	def __wrapinterp__(interp,x):
@@ -51,8 +43,8 @@ args = parser.parse_args()
 print('Loading 2M++ and SN data')
 fr=readFitres(args.fitres)
 
-vel=np.load('/Users/darcykenworthy/Downloads/twompp_velocity.npy')
-density=np.load('/Users/darcykenworthy/Downloads/twompp_density.npy')
+vel=np.load('twompp_velocity.npy')
+density=np.load('twompp_density.npy')
 
 # In[3]:
 
@@ -70,137 +62,161 @@ losinterp=interpolate.RegularGridInterpolator((x,y,z),losvel)
 losinterp=wrapinterp(losinterp)
 densityinterp=wrapinterp(densityinterp)
 
-print('Compiling Stan model')
-
+# functions {
+#     int intFloor(int leftStart, int rightStart, real iReal)
+#     {
+#       // This is absurd. Use bisection algorithm to find int floor.
+#       int left;
+#       int right;
+# 
+#       left = leftStart;
+#       right = rightStart;
+# 
+#       while((left + 1) < right) {
+#         int mid;
+#         // print("left, right, mid, i, ", left, ", ", right, ", ", mid, ", ", iReal);
+#         mid = left + (right - left) / 2;
+#         if(iReal < mid) {
+#           right = mid;
+#         }
+#         else {
+#           left = mid;
+#         }
+#       }
+#       return left;
+#     }
+#     // Interpolate arr using a non-integral index i
+#     // Note: 1 <= i <= length(arr)
+#     vector interpolateLinear(matrix arr, vector i)
+#     {
+#       int numinterppoints=dims(arr)[2];
+#       int isize=dims(i)[1];
+#       int iLeft;
+#       int iRight;
+#       vector[isize] valLeft;
+#       vector[isize] valRight;
+# 
+#       // Get i, value at left. If exact time match, then return value.
+#       for (idx in 1:isize){
+#       		print(i[idx]);
+# 		  iLeft = intFloor(1, numinterppoints, i[idx]);
+# 		  // Get i, value at right.
+# 		  iRight  = iLeft + 1;
+# 		  valLeft[idx] = arr[idx, iLeft];
+# 		  valRight[idx] = arr[idx,iRight];
+#       }
+# 
+#       // Linearly interpolate between values at left and right.
+#       return valLeft + (valRight - valLeft) .* (i - iLeft);
+#     }
+# }
 velonlycode="""
-functions {
-    int intFloor(int leftStart, int rightStart, real iReal)
-    {
-      // This is absurd. Use bisection algorithm to find int floor.
-      int left;
-      int right;
-
-      left = leftStart;
-      right = rightStart;
-
-      while((left + 1) < right) {
-        int mid;
-        // print("left, right, mid, i, ", left, ", ", right, ", ", mid, ", ", iReal);
-        mid = left + (right - left) / 2;
-        if(iReal < mid) {
-          right = mid;
-        }
-        else {
-          left = mid;
-        }
-      }
-      return left;
-    }
-    // Interpolate arr using a non-integral index i
-    // Note: 1 <= i <= length(arr)
-    real interpolateLinear(real[] arr, real i)
-    {
-      int iLeft;
-      real valLeft;
-      int iRight;
-      real valRight;
-
-      // print("interpolating ", i);
-
-      // Get i, value at left. If exact time match, then return value.
-      iLeft = intFloor(1, size(arr), i);
-      valLeft = arr[iLeft];
-      if(iLeft == i) {
-        return valLeft;
-      }
-    
-      // Get i, value at right.
-      iRight = iLeft + 1;
-      valRight = arr[iRight];
-
-      // Linearly interpolate between values at left and right.
-      return valLeft + (valRight - valLeft) * (i - iLeft);
-    }
-}
-
 data {
+	int numsn;
     int nintdist;
-    //Observed CMB frame redshift
-    real zobs;
-    //Errors in CMB frame redshift
-    real zerr;
-    //Uncertainty in nonlinear peculiar velocity
-    real vpecnonlindisp;
+    
+    //observed quantities
+    vector[numsn] zobs; //Observed CMB frame redshift
+    vector[numsn] zerr; //Errors in CMB frame redshift
     
     //Quantities for interpolation of 2M++ grid
-    real losdistancezero;
-    real losdistancedelta;
-    real losvelocities[nintdist];
-    real losdensities[nintdist];
+    real rho; //scale for GP interpolation
+    real losdistancedelta; //difference in distance between points on the interpolation line
+    vector[numsn] losdistancezero; //zeropoint distance for each SN
+    matrix[numsn,nintdist] losvelocities; //LOS Velocities along line of sight for interpolation
+    matrix[numsn,nintdist] losdensities ;//Densities along line of sight for interpolation
     
     //Cosmological params
+    real vpecnonlindisp; //Uncertainty in nonlinear peculiar velocity
     real c;
     real q;
     real j;
 }
-
+transformed data{
+	vector[nintdist] zpecdesignmatrix[numsn];
+	vector[nintdist] densitydesignmatrix[numsn];
+	real numrange[nintdist];
+	for (i in 1:nintdist){
+		numrange[i]=i;
+	}
+    {      
+		matrix[numsn,nintdist] temp;
+		matrix[nintdist, nintdist] K=gp_exp_quad_cov(numrange, 1., rho);
+		temp = mdivide_left_spd(K, (losvelocities/c)')';
+		for (i in 1:numsn){zpecdesignmatrix[i]=temp[i]'; }
+		temp = mdivide_left_spd(K, losdensities')';
+		for (i in 1:numsn){densitydesignmatrix[i]=temp[i]'; }
+    }  	
+}
 parameters{
-    real<lower=losdistancezero,upper=losdistancezero+losdistancedelta*nintdist> latdistance;
+    vector<lower=1,upper=1+nintdist>[numsn]realinterpindex;
 }
 transformed parameters{
-    real distdimensionless= latdistance*100/c;
-    real zpecvel = interpolateLinear(losvelocities,1+ (latdistance-losdistancezero)/losdistancedelta)/c;
-	real zcosm =   distdimensionless*(1+ ( q + 1) *distdimensionless / 2 + ( j + 2*q + 1) *square(distdimensionless )/6   ) ;
-    real densitycontrast = interpolateLinear(losdensities,1+ (latdistance-losdistancezero)/losdistancedelta);
+    vector[numsn] latdistance=(realinterpindex-1)*losdistancedelta + losdistancezero;
+    vector[numsn] distdimensionless= latdistance*100/c;
+	vector[numsn] zcosm =   distdimensionless .*(1+ ( q + 1) *distdimensionless / 2 + ( j + 2*q + 1) *square(distdimensionless )/6   ) ;
+    vector[numsn] zpecvel ;
+    vector[numsn] densitycontrast ;
+	{
+		matrix[nintdist,numsn] k_x1_x2 =  gp_exp_quad_cov(to_array_1d(realinterpindex),numrange ,1,rho);
+		for (i in 1:numsn){
+			zpecvel[i]        =(k_x1_x2[i] * zpecdesignmatrix[i]);
+			densitycontrast[i]=(k_x1_x2[i] * densitydesignmatrix[i]);
+		}
+	}	
+
 }
 model{
-    zpecvel ~ normal( (1+z)/(1+zcosm) -1 , sqrt( square(vpecnonlindisp/c)+square(zerr/(1+zcosm)));
+	zpecvel ~ normal( (1+zobs)./(1+zcosm) -1 , sqrt( square(vpecnonlindisp/c)+square(zerr ./(1+zcosm) ) ));
     target+=log(1+densitycontrast);
 }
 """
-velonlymodel=pystan.StanModel(model_code=velonlycode)
 
-print('Running model on each supernova')
 c=constants.c.to(u.km/u.s).value 
 locs,samples,scales,warnings=[],[],[],[]
 
-def samplezcosmforsn(sn):
+distinterpdelt=4
+npointsinterp=20
+losinterppoints=np.empty((fr.size, npointsinterp))
+densityinterppoints=np.empty((fr.size,npointsinterp))
+distzero= np.empty(fr.size)
+for i,sn in enumerate(fr):
 	unitvector= SkyCoord(ra= sn['RA']*u.deg, dec=sn['DEC']*u.deg).galactic
 	unitvector= np.array([np.cos(unitvector.b)*np.cos(unitvector.l),np.cos(unitvector.b)*np.sin(unitvector.l),np.sin(unitvector.b)])
 	distfid=sn['zCMB']*c/100
-	distinterpdelt=2
-	npointsinterp=40
-	distzero=max(0,distfid-distinterpdelt*npointsinterp//2)
-	losinterppoints=np.array([losinterp((distzero+distinterpdelt*i )*unitvector) for i in range(npointsinterp)])
-	densityinterppoints=np.array([densityinterp((distzero+distinterpdelt*i )*unitvector) for i in range(npointsinterp)])
-	if np.isnan(losinterppoints).any():
-		return [],np.nan,np.nan,{},''
-	else:
-		velsample=velonlymodel.sampling({
-		 'nintdist': npointsinterp,
-		 'zobs':  sn['zCMB'],
-		 'zerr': sn['zCMBERR'],
-		 'vpecnonlindisp': 250,
-		 'losdistancezero': distzero,
-		 'losdistancedelta':distinterpdelt ,
-		 'losvelocities': losinterppoints,
-		 'losdensities':densityinterppoints,
-		 'c':c ,
-		 'q': -0.55,
-		 'j':1
-	},control={'max_treedepth':20},init=lambda :{
-		'z': np.random.normal(sn['zCMB'],1e-4),
-		'latdistance': np.random.normal(distfid,10)
-	})
-		loc,scale=stats.norm.fit(velsample['zcosm'])
-		warnings=stream.getvalue()
-		stream.truncate(0)
-		return velsample['zcosm'],loc,scale,{key:velsample[key] for key in ['densitycontrast','zpecvel','latdistance']},warnings
-results= [samplezcosmforsn(sn) for sn in fr]
+	distzero[ i]=max(0,distfid-distinterpdelt*npointsinterp//2)
+	losinterppoints[i]=np.array([losinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
+	densityinterppoints[i]=np.array([densityinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
+
+cut= ~np.isnan(losinterppoints).any(axis=1)
+print(cut.sum())
+datadictionary={
+	'rho': 1,
+	'numsn': int(cut.sum()),
+	 'nintdist': (npointsinterp),
+	 'zobs':  fr['zCMB'][cut],
+	 'zerr': fr['zCMBERR'][cut],
+	 'vpecnonlindisp': 250,
+	 'losdistancezero': distzero[cut],
+	 'losdistancedelta':distinterpdelt ,
+	 'losvelocities': losinterppoints[cut],
+	 'losdensities':densityinterppoints[cut],
+	 'c':c ,
+	 'q': -0.55,
+	 'j':1
+}
+print('Compiling Stan model')
+
+velonlymodel=stan.build(velonlycode,datadictionary)
+
+print('Sampling from Stan model')
+velsample=velonlymodel.sample(init= [{'realinterpindex':np.zeros(cut.sum())+npointsinterp//2}]*4)
+
 with open(args.outputfile.replace('.csv','.pickle'),'wb') as file:
-	pickle.dump(results,file)
+	pickle.dump([datadictionary,velsample],file)
 	
-zcosm,locs,scales,zpecvel,warnings=list(zip(*results))
+locs,scales= np.mean( velsample['zcosm'],axis=1), np.std(velsample['zcosm'], axis=1)
+fr=fr[cut]
 cid,idsurvey=fr['CID'],fr['IDSURVEY']
 with open(args.outputfile,'w') as file:
 	writer=csv.writer(file,delimiter=',')
@@ -208,4 +224,3 @@ with open(args.outputfile,'w') as file:
 	for i in tqdm(range(fr.size),total=fr.size):
 			if np.isnan(locs[i]): continue
 			writer.writerow([cid[i],idsurvey[i],fr['zCMB'][i], locs[i],scales[i]])
-stream.close()
