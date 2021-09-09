@@ -42,6 +42,9 @@ args = parser.parse_args()
 #outputfile=path.splitext(args.fitres)[0]+'_VPEC_DISTMARG.csv'
 print('Loading 2M++ and SN data')
 fr=readFitres(args.fitres)
+fr=renameDups(fr)
+fr=fr[:100]
+dupsmatrix=(fr['CID'][np.newaxis,:]==fr['CID'][:,np.newaxis])*1.
 
 vel=np.load('twompp_velocity.npy')
 density=np.load('twompp_density.npy')
@@ -118,7 +121,12 @@ data {
     //observed quantities
     vector[numsn] zobs; //Observed CMB frame redshift
     vector[numsn] zerr; //Errors in CMB frame redshift
-    
+    vector[numsn] muobs;
+	vector<lower=0>[numsn] muerr; 
+	vector[numsn] biasscale;
+	matrix[numsn,numsn] dupsmatrix;
+
+
     //Quantities for interpolation of 2M++ grid
     real rho; //scale for GP interpolation
     real losdistancedelta; //difference in distance between points on the interpolation line
@@ -127,15 +135,15 @@ data {
     matrix[numsn,nintdist] losdensities ;//Densities along line of sight for interpolation
     
     //Cosmological params
-    real vpecnonlindisp; //Uncertainty in nonlinear peculiar velocity
     real c;
-    real q;
     real j;
 }
 transformed data{
 	vector[nintdist] zpecdesignmatrix[numsn];
 	vector[nintdist] densitydesignmatrix[numsn];
 	real numrange[nintdist];
+	matrix[numsn,numsn] dupsmatrixscaled=quad_form_diag(dupsmatrix,sqrt(biasscale));
+	matrix[numsn,numsn] muvarscaled=  diag_matrix(biasscale .* (square(muerr)));
 	for (i in 1:nintdist){
 		numrange[i]=i;
 	}
@@ -146,29 +154,56 @@ transformed data{
 		for (i in 1:numsn){zpecdesignmatrix[i]=temp[i]'; }
 		temp = mdivide_left_spd(K, losdensities')';
 		for (i in 1:numsn){densitydesignmatrix[i]=temp[i]'; }
-    }  	
+    }
 }
+
 parameters{
     vector<lower=1,upper=1+nintdist>[numsn]realinterpindex;
+    real<lower=0> sigint;
+    real<lower=0> vpecnonlindisp; //Uncertainty in nonlinear peculiar velocity
+    real<multiplier=.1> offset;
+    real<lower=0, upper=1> OmegaM;
+
 }
 transformed parameters{
+	real q = 3*OmegaM/2 -1;
     vector[numsn] latdistance=(realinterpindex-1)*losdistancedelta + losdistancezero;
-    vector[numsn] distdimensionless= latdistance*100/c;
-	vector[numsn] zcosm =   distdimensionless .*(1+ ( q + 1) *distdimensionless / 2 + ( j + 2*q + 1) *square(distdimensionless )/6   ) ;
+	vector[numsn] zcosm  ;
     vector[numsn] zpecvel ;
     vector[numsn] densitycontrast ;
+	vector[numsn] mu;
 	{
 		matrix[nintdist,numsn] k_x1_x2 =  gp_exp_quad_cov(to_array_1d(realinterpindex),numrange ,1,rho);
+    	vector[numsn] distdimensionless= latdistance*100/c;
+		zcosm =   distdimensionless .*(1+ ( q + 1) *distdimensionless / 2 + ( j + 2*q + 1) *square(distdimensionless )/6   ) ;
+		
+		mu = 5* log10 ( c*zcosm / 100 .* (1+ (1-q) * zcosm/ 2 - (1-q-3*square(q) +j)*square(zcosm)/6) )+25;
 		for (i in 1:numsn){
 			zpecvel[i]        =(k_x1_x2[i] * zpecdesignmatrix[i]);
 			densitycontrast[i]=(k_x1_x2[i] * densitydesignmatrix[i]);
 		}
-	}	
+	}
+	
 
 }
 model{
+	//priors
+	OmegaM ~ normal(.3166,.0084);
+	offset ~ normal(0,1);
+	sigint ~ lognormal(log(.1),.5);
+	vpecnonlindisp ~ lognormal(log(150),1);
+
+	matrix[numsn,numsn] SIGMAmu= square(sigint)*dupsmatrixscaled+muvarscaled;
+	muobs ~ multi_normal(mu +offset, SIGMAmu);
 	zpecvel ~ normal( (1+zobs)./(1+zcosm) -1 , sqrt( square(vpecnonlindisp/c)+square(zerr ./(1+zcosm) ) ));
     target+=log(1+densitycontrast);
+}
+generated quantities{
+	vector[numsn] muobs_hat;
+	{
+		matrix[numsn,numsn] SIGMAmu= square(sigint)*dupsmatrixscaled+muvarscaled;
+		muobs_hat= multi_normal_rng(mu+offset,SIGMAmu);
+	}
 }
 """
 
@@ -191,16 +226,21 @@ for i,sn in enumerate(fr):
 cut= ~np.isnan(losinterppoints).any(axis=1)
 print(cut.sum())
 datadictionary={
-	'rho': 1,
 	'numsn': int(cut.sum()),
 	 'nintdist': (npointsinterp),
 	 'zobs':  fr['zCMB'][cut],
 	 'zerr': fr['zCMBERR'][cut],
-	 'vpecnonlindisp': 250,
+	 'muobs': fr['MU'][cut],
+	 'muerr': fr['MUERR_RAW'][cut],
+	 'biasscale':fr['biasScale_muCOV'][cut],
+	 'dupsmatrix': dupsmatrix[cut,:][:,cut],
+	 
+	 'rho': 1,
 	 'losdistancezero': distzero[cut],
 	 'losdistancedelta':distinterpdelt ,
 	 'losvelocities': losinterppoints[cut],
 	 'losdensities':densityinterppoints[cut],
+	 
 	 'c':c ,
 	 'q': -0.55,
 	 'j':1
@@ -209,8 +249,16 @@ print('Compiling Stan model')
 
 velonlymodel=stan.build(velonlycode,datadictionary)
 
+num_chains=4
 print('Sampling from Stan model')
-velsample=velonlymodel.sample(init= [{'realinterpindex':np.zeros(cut.sum())+npointsinterp//2}]*4)
+velsample=velonlymodel.sample(num_chains=num_chains,init= [{
+		'realinterpindex':np.zeros(cut.sum())+npointsinterp//2,
+		'offset':0,
+		'sigint':.1,
+		'vpecnonlindisp':250,
+		'OmegaM':.3
+		
+		}]*num_chains )#
 
 with open(args.outputfile.replace('.csv','.pickle'),'wb') as file:
 	pickle.dump([datadictionary,velsample],file)

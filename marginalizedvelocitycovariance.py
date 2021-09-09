@@ -111,7 +111,6 @@ pecvelcov=utilfunctions.checkposdef(pecvelcov)
 
 
 def posterior(prior,pred,constraint,hasconstraint):
-        
         sumcovtransform=linalg.cholesky(prior[hasconstraint,:][:,hasconstraint]+constraint,lower=True)
         sumcovtransform_times_priorcov= linalg.solve_triangular(sumcovtransform,prior[hasconstraint,:][:,hasconstraint],lower=True);
         sumcovtransform_times_tmppcov=  linalg.solve_triangular(sumcovtransform, constraint,lower=True);

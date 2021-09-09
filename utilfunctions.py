@@ -13,6 +13,7 @@ import matplotlib.ticker as mtick
 from os import path
 import hashlib
 import csv,json
+import gzip
 # from v3_0_duplicate_map import dups as dillon_dups
 from duplicates_v3_06_renamed import duplicate_dictionary as dillon_dups
 
@@ -22,7 +23,10 @@ cosmo=Planck15
 
 
 def readFitres(fileName):			
-    with open(fileName,'r') as file : fileText=file.read()
+    if fileName.endswith('.gz'):
+    	with gzip.open(fileName,'r') as file : fileText=file.read().decode('utf-8')
+    else:
+    	with open(fileName,'r') as file : fileText=file.read()
     result=re.compile('VARNAMES:([\w\s]+)\n').search(fileText)
     names= ['VARNAMES:']+[x for x in result.groups()[0].split() if not x=='']
     namesToTypes={'VARNAMES':'U3','CID':'U20','FIELD':'U4','IDSURVEY':int}
