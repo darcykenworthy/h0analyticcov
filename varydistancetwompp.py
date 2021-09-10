@@ -42,6 +42,8 @@ args = parser.parse_args()
 #outputfile=path.splitext(args.fitres)[0]+'_VPEC_DISTMARG.csv'
 print('Loading 2M++ and SN data')
 fr=readFitres(args.fitres)
+sncoords,snpos,separation,angsep= getpositions(fr,hostlocs=False)
+dotproddipole= np.cos(sncoords.separation(dipolecoord)).value
 
 vel=np.load('twompp_velocity.npy')
 density=np.load('twompp_density.npy')
@@ -118,6 +120,7 @@ data {
     //observed quantities
     vector[numsn] zobs; //Observed CMB frame redshift
     vector[numsn] zerr; //Errors in CMB frame redshift
+    vector[numsn] dotproddipole; //dot product with 2M++ dipole vector
     
     //Quantities for interpolation of 2M++ grid
     real rho; //scale for GP interpolation
@@ -135,6 +138,7 @@ data {
 transformed data{
 	vector[nintdist] zpecdesignmatrix[numsn];
 	vector[nintdist] densitydesignmatrix[numsn];
+	
 	real numrange[nintdist];
 	for (i in 1:nintdist){
 		numrange[i]=i;
@@ -150,6 +154,9 @@ transformed data{
 }
 parameters{
     vector<lower=1,upper=1+nintdist>[numsn]realinterpindex;
+    real<offset=0,multiplier=1> betarescale;
+	real<offset=0,multiplier=100> vext;
+
 }
 transformed parameters{
     vector[numsn] latdistance=(realinterpindex-1)*losdistancedelta + losdistancezero;
@@ -160,13 +167,15 @@ transformed parameters{
 	{
 		matrix[nintdist,numsn] k_x1_x2 =  gp_exp_quad_cov(to_array_1d(realinterpindex),numrange ,1,rho);
 		for (i in 1:numsn){
-			zpecvel[i]        =(k_x1_x2[i] * zpecdesignmatrix[i]);
+			zpecvel[i]  = (vext-159)/c*dotproddipole[i] + betarescale*(k_x1_x2[i] * zpecdesignmatrix[i]);
 			densitycontrast[i]=(k_x1_x2[i] * densitydesignmatrix[i]);
 		}
 	}	
 
 }
 model{
+	betarescale ~ normal(1,.021/.431);
+	vext ~ normal(159,23);
 	zpecvel ~ normal( (1+zobs)./(1+zcosm) -1 , sqrt( square(vpecnonlindisp/c)+square(zerr ./(1+zcosm) ) ));
     target+=log(1+densitycontrast);
 }
@@ -180,27 +189,30 @@ npointsinterp=20
 losinterppoints=np.empty((fr.size, npointsinterp))
 densityinterppoints=np.empty((fr.size,npointsinterp))
 distzero= np.empty(fr.size)
+
 for i,sn in enumerate(fr):
-	unitvector= SkyCoord(ra= sn['RA']*u.deg, dec=sn['DEC']*u.deg).galactic
+	unitvector= sncoords[i].galactic
 	unitvector= np.array([np.cos(unitvector.b)*np.cos(unitvector.l),np.cos(unitvector.b)*np.sin(unitvector.l),np.sin(unitvector.b)])
 	distfid=sn['zCMB']*c/100
 	distzero[ i]=max(0,distfid-distinterpdelt*npointsinterp//2)
 	losinterppoints[i]=np.array([losinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
 	densityinterppoints[i]=np.array([densityinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
 
-cut= ~np.isnan(losinterppoints).any(axis=1)
-print(cut.sum())
+intmmvolumecut= ~np.isnan(losinterppoints).any(axis=1)
+print(intmmvolumecut.sum())
 datadictionary={
 	'rho': 1,
-	'numsn': int(cut.sum()),
+	'numsn': int(intmmvolumecut.sum()),
 	 'nintdist': (npointsinterp),
-	 'zobs':  fr['zCMB'][cut],
-	 'zerr': fr['zCMBERR'][cut],
-	 'vpecnonlindisp': 250,
-	 'losdistancezero': distzero[cut],
+	 'zobs':  fr['zCMB'][intmmvolumecut],
+	 'zerr': fr['zCMBERR'][intmmvolumecut],
+	 'dotproddipole': dotproddipole[intmmvolumecut],
+	 
+	 'vpecnonlindisp': 150,
+	 'losdistancezero': distzero[intmmvolumecut],
 	 'losdistancedelta':distinterpdelt ,
-	 'losvelocities': losinterppoints[cut],
-	 'losdensities':densityinterppoints[cut],
+	 'losvelocities': losinterppoints[intmmvolumecut],
+	 'losdensities':densityinterppoints[intmmvolumecut],
 	 'c':c ,
 	 'q': -0.55,
 	 'j':1
@@ -210,17 +222,24 @@ print('Compiling Stan model')
 velonlymodel=stan.build(velonlycode,datadictionary)
 
 print('Sampling from Stan model')
-velsample=velonlymodel.sample(init= [{'realinterpindex':np.zeros(cut.sum())+npointsinterp//2}]*4)
-
+velsample=velonlymodel.sample(init= [{'realinterpindex':np.zeros(intmmvolumecut.sum())+npointsinterp//2}]*4)
+datadictionary['fitres']=fr
+datadictionary['volumecut']=intmmvolumecut
 with open(args.outputfile.replace('.csv','.pickle'),'wb') as file:
 	pickle.dump([datadictionary,velsample],file)
 	
 locs,scales= np.mean( velsample['zcosm'],axis=1), np.std(velsample['zcosm'], axis=1)
-fr=fr[cut]
-cid,idsurvey=fr['CID'],fr['IDSURVEY']
+cid,idsurvey=fr[intmmvolumecut]['CID'],fr[intmmvolumecut]['IDSURVEY']
 with open(args.outputfile,'w') as file:
 	writer=csv.writer(file,delimiter=',')
 	writer.writerow(['CID','IDSURVEY','zCMB','zHD', 'zHDERR'])
-	for i in tqdm(range(fr.size),total=fr.size):
+	for i in tqdm(range(fr[intmmvolumecut].size),total=fr[intmmvolumecut].size):
 			if np.isnan(locs[i]): continue
-			writer.writerow([cid[i],idsurvey[i],fr['zCMB'][i], locs[i],scales[i]])
+			writer.writerow([cid[i],idsurvey[i],fr[intmmvolumecut]['zCMB'][i], locs[i],scales[i]])
+
+pecvelcov= np.load(args.pecvelcov)+np.diag(datadictionary['vpecnonlindisp']**2)
+zpvtotal = (1+fr[intmmvolumecut]['zCMB'][:,np.newaxis] )/(velsample['zcosm']+1)-1
+zpvinfcov= np.cov(zpvtotal)
+regressioncoeffs=pecvelcov[intmmvolumecut,~intmmvolumecut]
+
+

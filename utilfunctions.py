@@ -16,6 +16,10 @@ import csv,json
 # from v3_0_duplicate_map import dups as dillon_dups
 from duplicates_v3_06_renamed import duplicate_dictionary as dillon_dups
 
+vext,vexterr=159,23 
+l,lerr = 304 , 11
+b,berr = 6,13
+dipolecoord=SkyCoord(l=l,b=b,frame='galactic',unit=u.deg)
 
 
 cosmo=Planck15
@@ -171,10 +175,6 @@ def checkposdef(matrix,condition=1e-10):
 	return covclipped 
 def separatevpeccontributions(sndata,sncoords):
 
-	vext,vexterr=159,23 
-	l,lerr = 304 , 11
-	b,berr = 6,13
-	dipolecoord=SkyCoord(l=l,b=b,frame='galactic',unit=u.deg)
 	vpecbulk=vext*np.cos(sncoords.separation(dipolecoord))
 	z=sndata['zCMB']
 	hascorrection=z<.06
