@@ -31,87 +31,79 @@ def wrapinterp(interp):
 			return np.nan
 	return (lambda x: __wrapinterp__(interp,x))
 
+
+distinterpdelt=4
+npointsinterp=20
+rho=1
+def readandshapenumpyfile(densityfile,velocityfile):
+	density=np.load(densityfile)
+	vel=np.load(velocityfile)
+	return density,vel
+def readandshapeasciifile(densityfile,velocityfile):
+	size=201
+	density=np.genfromtxt(densityfile).reshape((size,size,size))
+	vel=np.genfromtxt(velocityfile).T.reshape((3,size,size,size))
+	return density,vel
+	
+	
+reconstructionsbysource={'Carrick15':(
+	('twompp_density.npy','twompp_velocity.npy'), 400/256.,257, SkyCoord(l=304,b=6,frame='galactic',unit=u.deg), 
+	{'betafiducial':.431,'betaerr':.021, 'vextfiducial':159,'vexterr':23,
+	'vpecnonlindisp':150}),
+	'Lilow21':(
+	('cartesian_grid_density_zCMB.dat','cartesian_grid_velocity_zCMB.dat'), 2,201,SkyCoord(l=298,b=12,frame='galactic',unit=u.deg), 
+	{'betafiducial':0.362,'betaerr':0.050, 'vextfiducial':209,'vexterr':59,
+	'vpecnonlindisp':150})}
+
+
+class PeculiarVelocityReconstruction:
+	def __init__(self,datapaths,resolution,numpointsperaxis,dipolecoord,fixedparams):
+		if path.splitext(datapaths[0])[-1]=='.npy':
+			self.density,self.vel=readandshapenumpyfile(*datapaths)
+		else:
+			self.density,self.vel=readandshapeasciifile(*datapaths)		
+		self.dipolecoord=dipolecoord
+		self.fixedparams=fixedparams
+		
+		x=(np.arange(0,numpointsperaxis)-numpointsperaxis//2)*resolution
+		y,z=x.copy(),x.copy()
+
+		dist=np.sqrt(x[:,np.newaxis,np.newaxis]**2+ y[np.newaxis,:,np.newaxis]**2+z[np.newaxis,np.newaxis,:]**2)
+		dist[x.size//2,y.size//2,z.size//2]=1e-4
+		self.losvel=((self.vel[0]*x[:,np.newaxis,np.newaxis]) + (self.vel[1]*y[np.newaxis,:,np.newaxis]) + (self.vel[2]*z[np.newaxis,np.newaxis,:]))/dist
+
+		losinterp=interpolate.RegularGridInterpolator((x,y,z),self.losvel)
+		densityinterp=interpolate.RegularGridInterpolator((x,y,z),self.density)
+		self.losinterp=wrapinterp(losinterp)
+		self.densityinterp=wrapinterp(densityinterp)
+
+# l,lerr = 304 , 11
+# b,berr = 6,13
+# 
+
 # In[2]:
 parser = argparse.ArgumentParser(description='Calculate parameter covariance from input calibration parameter priors and FITRES calibration variants ')
 parser.add_argument('fitres',type=str, 
                     help='Fitres file with RA, DEC, zCMB')
 parser.add_argument('outputfile',type=str, 
                     help='Output csv')
+parser.add_argument('--reconstructionsource',type=str, default='Carrick15',
+                    help='Options are Carrick15 or Lilow21')
+parser.add_argument('--maxsn',type=int, default=None,
+                    help="Don't fit more than this many SNe")
 
 args = parser.parse_args()
+print(f'Loading {args.reconstructionsource}')
+reconstruction=PeculiarVelocityReconstruction(*reconstructionsbysource[args.reconstructionsource])
+
 #outputfile=path.splitext(args.fitres)[0]+'_VPEC_DISTMARG.csv'
-print('Loading 2M++ and SN data')
+print('Loading SN data')
 fr=readFitres(args.fitres)
 sncoords,snpos,separation,angsep= getpositions(fr,hostlocs=False)
-dotproddipole= np.cos(sncoords.separation(dipolecoord)).value
-
-vel=np.load('twompp_velocity.npy')
-density=np.load('twompp_density.npy')
 
 # In[3]:
 
-x=(np.arange(0,257)-128.)*400/256.
-y,z=x.copy(),x.copy()
 
-densityinterp=interpolate.RegularGridInterpolator((x,y,z),density)
-
-dist=np.sqrt(x[:,np.newaxis,np.newaxis]**2+ y[np.newaxis,:,np.newaxis]**2+z[np.newaxis,np.newaxis,:]**2)
-dist[128,128,128]=1e-4
-
-losvel=((vel[0]*x[:,np.newaxis,np.newaxis]) + (vel[1]*y[np.newaxis,:,np.newaxis]) + (vel[2]*z[np.newaxis,np.newaxis,:]))/dist
-losinterp=interpolate.RegularGridInterpolator((x,y,z),losvel)
-
-losinterp=wrapinterp(losinterp)
-densityinterp=wrapinterp(densityinterp)
-
-# functions {
-#     int intFloor(int leftStart, int rightStart, real iReal)
-#     {
-#       // This is absurd. Use bisection algorithm to find int floor.
-#       int left;
-#       int right;
-# 
-#       left = leftStart;
-#       right = rightStart;
-# 
-#       while((left + 1) < right) {
-#         int mid;
-#         // print("left, right, mid, i, ", left, ", ", right, ", ", mid, ", ", iReal);
-#         mid = left + (right - left) / 2;
-#         if(iReal < mid) {
-#           right = mid;
-#         }
-#         else {
-#           left = mid;
-#         }
-#       }
-#       return left;
-#     }
-#     // Interpolate arr using a non-integral index i
-#     // Note: 1 <= i <= length(arr)
-#     vector interpolateLinear(matrix arr, vector i)
-#     {
-#       int numinterppoints=dims(arr)[2];
-#       int isize=dims(i)[1];
-#       int iLeft;
-#       int iRight;
-#       vector[isize] valLeft;
-#       vector[isize] valRight;
-# 
-#       // Get i, value at left. If exact time match, then return value.
-#       for (idx in 1:isize){
-#       		print(i[idx]);
-# 		  iLeft = intFloor(1, numinterppoints, i[idx]);
-# 		  // Get i, value at right.
-# 		  iRight  = iLeft + 1;
-# 		  valLeft[idx] = arr[idx, iLeft];
-# 		  valRight[idx] = arr[idx,iRight];
-#       }
-# 
-#       // Linearly interpolate between values at left and right.
-#       return valLeft + (valRight - valLeft) .* (i - iLeft);
-#     }
-# }
 velonlycode="""
 data {
 	int numsn;
@@ -134,6 +126,11 @@ data {
     real c;
     real q;
     real j;
+    
+    real vextfiducial;
+    real betafiducial;
+    real vexterr;
+    real betaerr;
 }
 transformed data{
 	vector[nintdist] zpecdesignmatrix[numsn];
@@ -167,56 +164,69 @@ transformed parameters{
 	{
 		matrix[nintdist,numsn] k_x1_x2 =  gp_exp_quad_cov(to_array_1d(realinterpindex),numrange ,1,rho);
 		for (i in 1:numsn){
-			zpecvel[i]  = (vext-159)/c*dotproddipole[i] + betarescale*(k_x1_x2[i] * zpecdesignmatrix[i]);
+			zpecvel[i]  = (vext-vextfiducial)/c*dotproddipole[i] + betarescale*(k_x1_x2[i] * zpecdesignmatrix[i]);
 			densitycontrast[i]=(k_x1_x2[i] * densitydesignmatrix[i]);
 		}
 	}	
 
 }
 model{
-	betarescale ~ normal(1,.021/.431);
-	vext ~ normal(159,23);
+	betarescale ~ normal(1,betaerr/betafiducial);
+	vext ~ normal(vextfiducial,vexterr);
 	zpecvel ~ normal( (1+zobs)./(1+zcosm) -1 , sqrt( square(vpecnonlindisp/c)+square(zerr ./(1+zcosm) ) ));
     target+=log(1+densitycontrast);
+}
+generated quantities{
+	vector[numsn] zobs_hat;
+	{	
+		vector[numsn] zpecvel_hat =to_vector( normal_rng( zpecvel, sqrt( square(vpecnonlindisp/c)+square(zerr ./(1+zcosm) ) )));
+		zobs_hat=(zpecvel_hat +1).*(1+zcosm) -1;
+	}	
 }
 """
 
 c=constants.c.to(u.km/u.s).value 
 locs,samples,scales,warnings=[],[],[],[]
 
-distinterpdelt=4
-npointsinterp=20
 losinterppoints=np.empty((fr.size, npointsinterp))
 densityinterppoints=np.empty((fr.size,npointsinterp))
 distzero= np.empty(fr.size)
 
-for i,sn in enumerate(fr):
+for i,sn in tqdm(enumerate(fr)):
 	unitvector= sncoords[i].galactic
 	unitvector= np.array([np.cos(unitvector.b)*np.cos(unitvector.l),np.cos(unitvector.b)*np.sin(unitvector.l),np.sin(unitvector.b)])
 	distfid=sn['zCMB']*c/100
 	distzero[ i]=max(0,distfid-distinterpdelt*npointsinterp//2)
-	losinterppoints[i]=np.array([losinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
-	densityinterppoints[i]=np.array([densityinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
+	losinterppoints[i]=np.array([reconstruction.losinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
+	densityinterppoints[i]=np.array([reconstruction.densityinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
 
 intmmvolumecut= ~np.isnan(losinterppoints).any(axis=1)
 print(intmmvolumecut.sum())
+if not (args.maxsn is  None) and intmmvolumecut.sum()>args.maxsn:
+	print(f'Cutting to {args.maxsn} SNe' )
+	cutindices=np.random.choice(np.where(intmmvolumecut)[0],size=args.maxsn,replace=False)
+	intmmvolumecut=np.zeros(fr.size,dtype=bool)
+	intmmvolumecut[cutindices]=True
+
 datadictionary={
-	'rho': 1,
 	'numsn': int(intmmvolumecut.sum()),
-	 'nintdist': (npointsinterp),
 	 'zobs':  fr['zCMB'][intmmvolumecut],
 	 'zerr': fr['zCMBERR'][intmmvolumecut],
-	 'dotproddipole': dotproddipole[intmmvolumecut],
-	 
-	 'vpecnonlindisp': 150,
+	 'dotproddipole': np.cos(sncoords[intmmvolumecut].separation(reconstruction.dipolecoord)).value,
+
+	 'rho': rho,
+	 'nintdist': (npointsinterp),
 	 'losdistancezero': distzero[intmmvolumecut],
 	 'losdistancedelta':distinterpdelt ,
 	 'losvelocities': losinterppoints[intmmvolumecut],
 	 'losdensities':densityinterppoints[intmmvolumecut],
+	 
 	 'c':c ,
 	 'q': -0.55,
-	 'j':1
+	 'j':1,
 }
+datadictionary.update(reconstruction.fixedparams)
+
 print('Compiling Stan model')
 
 velonlymodel=stan.build(velonlycode,datadictionary)
