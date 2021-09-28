@@ -79,8 +79,6 @@ class PeculiarVelocityReconstruction:
 
 # l,lerr = 304 , 11
 # b,berr = 6,13
-# 
-
 # In[2]:
 parser = argparse.ArgumentParser(description='Calculate parameter covariance from input calibration parameter priors and FITRES calibration variants ')
 parser.add_argument('fitres',type=str, 
@@ -99,9 +97,9 @@ reconstruction=PeculiarVelocityReconstruction(*reconstructionsbysource[args.reco
 #outputfile=path.splitext(args.fitres)[0]+'_VPEC_DISTMARG.csv'
 print('Loading SN data')
 fr=readFitres(args.fitres)
+fr=renameDups(fr)
+fr,dupinds=cutdups(fr,returninds=True)
 sncoords,snpos,separation,angsep= getpositions(fr,hostlocs=False)
-
-# In[3]:
 
 
 velonlycode="""
@@ -192,9 +190,10 @@ losinterppoints=np.empty((fr.size, npointsinterp))
 densityinterppoints=np.empty((fr.size,npointsinterp))
 distzero= np.empty(fr.size)
 
-for i,sn in tqdm(enumerate(fr)):
-	unitvector= sncoords[i].galactic
-	unitvector= np.array([np.cos(unitvector.b)*np.cos(unitvector.l),np.cos(unitvector.b)*np.sin(unitvector.l),np.sin(unitvector.b)])
+for i,sn in tqdm(enumerate(fr),total=fr.size):
+	unitvector= sncoords[i].galactic.cartesian
+	unitvector=np.array([unitvector.x,unitvector.y,unitvector.z])
+	#unitvector= np.array([np.cos(unitvector.b)*np.cos(unitvector.l),np.cos(unitvector.b)*np.sin(unitvector.l),np.sin(unitvector.b)])
 	distfid=sn['zCMB']*c/100
 	distzero[ i]=max(0,distfid-distinterpdelt*npointsinterp//2)
 	losinterppoints[i]=np.array([reconstruction.losinterp((distzero[i]+distinterpdelt*j )*unitvector) for j in range(npointsinterp)])
@@ -238,18 +237,41 @@ datadictionary['volumecut']=intmmvolumecut
 with open(args.outputfile.replace('.csv','.pickle'),'wb') as file:
 	pickle.dump([datadictionary,velsample],file)
 	
-locs,scales= np.mean( velsample['zcosm'],axis=1), np.std(velsample['zcosm'], axis=1)
-cid,idsurvey=fr[intmmvolumecut]['CID'],fr[intmmvolumecut]['IDSURVEY']
-with open(args.outputfile,'w') as file:
-	writer=csv.writer(file,delimiter=',')
-	writer.writerow(['CID','IDSURVEY','zCMB','zHD', 'zHDERR'])
-	for i in tqdm(range(fr[intmmvolumecut].size),total=fr[intmmvolumecut].size):
-			if np.isnan(locs[i]): continue
-			writer.writerow([cid[i],idsurvey[i],fr[intmmvolumecut]['zCMB'][i], locs[i],scales[i]])
+# locs,scales= np.mean( velsample['zcosm'],axis=1), np.std(velsample['zcosm'], axis=1)
+# with open(args.outputfile,'w') as file:
+# 	writer=csv.writer(file,delimiter=',')
+# 	writer.writerow(['CID','IDSURVEY','zCMB','zHD', 'zHDERR'])
+# 	for i in (range(fr[intmmvolumecut].size),total=fr[intmmvolumecut].size):
+# 			if np.isnan(locs[i]): continue
+# 			writer.writerow([cid[i],idsurvey[i],fr[intmmvolumecut]['zCMB'][i], locs[i],scales[i]])
 
-pecvelcov= np.load(args.pecvelcov)+np.diag(datadictionary['vpecnonlindisp']**2)
-zpvtotal = (1+fr[intmmvolumecut]['zCMB'][:,np.newaxis] )/(velsample['zcosm']+1)-1
-zpvinfcov= np.cov(zpvtotal)
-regressioncoeffs=pecvelcov[intmmvolumecut,~intmmvolumecut]
+pecvelcov=np.load('velocitycovariance-FITOPT000_MUOPT000-darksky_class.npy')
+pecvelcov=pecvelcov[dupinds,:][:,dupinds]+reconstruction.fixedparams['vpecnonlindisp']**2*np.diag(np.ones(fr.size))
+pvinf = datadictionary['c']*((1+fr[intmmvolumecut]['zCMB'][:,np.newaxis] )/(velsample['zcosm']+1)-1)
+pvinfcov= np.cov(pvinf)
+
+cholpecvelorig=linalg.cholesky(pecvelcov[intmmvolumecut,:][:,intmmvolumecut],lower=True)
+regressioncoeffs=linalg.solve_triangular(cholpecvelorig,pecvelcov[intmmvolumecut,:][:,~intmmvolumecut],lower=True)
+regressioncoeffs=linalg.solve_triangular(cholpecvelorig.T,regressioncoeffs,lower=False)
+
+finalvcov=np.empty(pecvelcov.shape)
+finalvcov[np.outer(intmmvolumecut,intmmvolumecut)] =pvinfcov.flatten()
+finalvcov[np.outer(intmmvolumecut,~intmmvolumecut)] =np.dot(regressioncoeffs.T,pvinfcov).flatten()
+finalvcov[np.outer(~intmmvolumecut,intmmvolumecut)] =np.dot(regressioncoeffs.T,pvinfcov).T.flatten()
+finalvcov[np.outer(~intmmvolumecut,~intmmvolumecut)]= (pecvelcov[~intmmvolumecut,:][:,~intmmvolumecut]- np.linalg.multi_dot((regressioncoeffs.T ,(pvinfcov- pecvelcov[intmmvolumecut,:][:,intmmvolumecut]),regressioncoeffs))).flatten()
+
+finalvmean=np.empty(fr.size)
+finalvmean[intmmvolumecut]=np.mean(pvinf,axis=1)
+finalvmean[~intmmvolumecut]=np.dot(regressioncoeffs.T,np.mean(pvinf,axis=1))
+#'VPECS_ILOS_COVARIANCE_v0.1.csv'
+cid,idsurvey,zcmb=fr['CID'],fr['IDSURVEY'],fr['zCMB']
+with tqdm(total=fr.size**2) as pbar:
+	with open(args.outputfile,'w') as file:
+		writer=csv.writer(file,delimiter=',')
+		writer.writerow(['CID_1','zCMB_1','VPEC_1','CID_2','zCMB_2','VPEC_2','VPEC_COVARIANCE'])
+		for i in range(fr.size):
+			for j in range(fr.size):
+				pbar.update()
+				writer.writerow([cid[i],zcmb[i],finalvmean[i],cid[j],zcmb[j],finalvmean[j],finalvcov[i,j]])
 
 
